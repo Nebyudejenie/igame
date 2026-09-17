@@ -64,11 +64,12 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
-addopts = "-m 'not load and not e2e and not chaos_infra'"
+addopts = "-m 'not load and not e2e and not chaos_infra and not keno_statistical'"
 markers = [
     "load: real-scale measurement tests (hundreds+ of concurrent sockets), excluded from the default run because their absolute latency numbers are sensitive to whatever else is sharing this process/CPU -- run standalone with `pytest -m load` for a clean reading, same reason real load tests run as their own dedicated process rather than interleaved with the correctness suite.",
     "e2e: real-browser tests (Playwright/Chromium), excluded from the default run because they need a Chromium binary most dev setups won't have installed -- run explicitly with `pytest -m e2e` after `playwright install chromium`.",
     "chaos_infra: restarts a real docker-compose service (Redis/Postgres) mid-test -- excluded even from `-m load` batch runs because it breaks every session-scoped fixture built on that service for the rest of the pytest process, not just its own test. Always run alone: `pytest -m chaos_infra`.",
+    "keno_statistical: large-N (>=1,000,000 draws/tickets) statistical convergence tests for the Keno RNG and paytable (spec Part 17) -- excluded from the default run purely because of wall-clock cost (tens of seconds to minutes), not flakiness. Run explicitly with `pytest -m keno_statistical -v -s`.",
 ]
 
 [tool.mypy]

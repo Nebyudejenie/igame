@@ -331,6 +331,43 @@ sms_node_health_score = Gauge(
     ["node_id", "node_name"],
 )
 
+# --- keno (build spec Part 16) ------------------------------------------
+
+keno_rounds_created_total = Counter("keno_rounds_created_total", "Keno rounds created")
+keno_rounds_completed_total = Counter("keno_rounds_completed_total", "Keno rounds settled to completion")
+keno_rounds_failed_total = Counter("keno_rounds_failed_total", "Keno rounds marked failed and refunded")
+keno_tickets_created_total = Counter("keno_tickets_created_total", "Keno tickets accepted")
+keno_tickets_settled_total = Counter("keno_tickets_settled_total", "Keno tickets settled, by outcome", ["outcome"])
+keno_stake_total = Counter("keno_stake_total", "Total ETB staked on Keno tickets")
+keno_payout_total = Counter("keno_payout_total", "Total ETB paid out on Keno tickets (excluding jackpot)")
+keno_actual_rtp = Gauge("keno_actual_rtp", "Trailing actual payout/stake ratio, by pick count", ["pick_count"])
+keno_reserve_balance = Gauge("keno_reserve_balance", "Current keno_reserve system account balance")
+keno_player_liability = Gauge("keno_player_liability", "Sum of all players' cash balances (money owed, not reserve)")
+keno_round_exposure_ratio = Gauge("keno_round_exposure_ratio", "Current round's projected_exposure / ceiling")
+keno_jackpot_pool = Gauge("keno_jackpot_pool", "Current keno_jackpot_pool system account balance")
+keno_draw_duration_seconds = Histogram("keno_draw_duration_seconds", "Wall time to compute+persist one round's draw")
+keno_settlement_duration_seconds = Histogram("keno_settlement_duration_seconds", "Wall time to settle one round's tickets")
+keno_settlement_errors_total = Counter("keno_settlement_errors_total", "Settlement passes that raised and were retried")
+keno_active_players = Gauge("keno_active_players", "Distinct users with a ticket in the current round")
+keno_ws_connections = Gauge("keno_ws_connections", "Gateway connections currently subscribed to keno:live")
+keno_bet_rejections_total = Counter("keno_bet_rejections_total", "Rejected bet placements, by reason", ["reason"])
+
+# Part 8's six revenue-model terms, instrumented directly rather than
+# only derivable from the counters above -- see docs/keno/07-economics-and-bankroll.md.
+keno_dau = Gauge("keno_dau", "Distinct Keno players in the trailing 24h")
+keno_sessions_per_user = Gauge("keno_sessions_per_user", "Trailing 24h average Keno sessions per active user")
+keno_rounds_per_session = Gauge("keno_rounds_per_session", "Trailing 24h average rounds played per session")
+keno_tickets_per_round = Gauge("keno_tickets_per_round", "Trailing 24h average tickets placed per round")
+keno_avg_stake = Gauge("keno_avg_stake", "Trailing 24h average ticket stake")
+keno_hold_pct = Gauge("keno_hold_pct", "Trailing 24h actual hold percentage ((stake-payout)/stake)")
+keno_arpdau = Gauge("keno_arpdau", "Trailing 24h average revenue per daily active user")
+keno_d1_retention = Gauge("keno_d1_retention", "Fraction of a signup cohort still active on day 1")
+keno_d7_retention = Gauge("keno_d7_retention", "Fraction of a signup cohort still active on day 7")
+keno_d30_retention = Gauge("keno_d30_retention", "Fraction of a signup cohort still active on day 30")
+keno_player_ltv = Gauge("keno_player_ltv", "Trailing average lifetime stake minus payout per player")
+keno_deposit_conversion_rate = Gauge("keno_deposit_conversion_rate", "Fraction of deposit attempts that succeed")
+keno_session_duration_seconds = Histogram("keno_session_duration_seconds", "Player session duration in the Keno screen")
+
 # --- bare /metrics server, for the two long-running processes with no
 # other HTTP surface of their own (engine worker, payout worker) --------
 
