@@ -1,0 +1,30 @@
+[Unit]
+Description=Arada Bingo nightly ledger reconciliation (packages/core/reconcile_job.py via the reconcile-job compose service)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# CHANGE THIS: the real deploy checkout path on the production host --
+# same as every other unit in this directory (see README.md).
+WorkingDirectory=/home/cosmic/game
+# reconcile-job is profiles: ["reconcile"]-gated in docker-compose.prod.yml
+# specifically so a plain `up -d` never runs it -- this unit is the actual
+# schedule README.md's own "Nightly ledger reconciliation" section
+# describes as a still-open, deploy-time step. `--profile reconcile` is
+# required here for the same reason; a bare `run --rm reconcile-job`
+# without it is rejected by Compose. The compose file path is inlined
+# directly (not via an Environment= var expanded in ExecStart=, which
+# needs a newer systemd than this deployment's own version can be
+# assumed to have) -- CHANGE THIS if the checkout path above changes.
+ExecStart=/usr/bin/docker compose -f /home/cosmic/game/deploy/docker-compose.prod.yml --profile reconcile run --rm reconcile-job
+
+# Exit code 1 (a real mismatch -- see packages/core/reconcile_job.py's own
+# main()) surfaces here as a failed unit, exactly like jobingo-backup.
+# Deliberately no retry-on-failure: reconcile_job.py already pushes the
+# mismatch count to Pushgateway when PUSHGATEWAY_URL is set (wiring
+# Prometheus's ledger_reconciliation_mismatch_count alert -- see
+# deploy/prometheus/alerts.yml), and `systemctl is-failed jobingo-reconcile`
+# is the same "is this actually running and clean" check
+# jobingo-backup.service's own comment already documents -- page on
+# either signal, whichever this deployment's real alerting is wired to.

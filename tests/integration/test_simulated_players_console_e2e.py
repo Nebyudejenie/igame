@@ -20,23 +20,16 @@ async def _delete_bot_completely(pool, user_id: int) -> None:
     # this file doesn't import that fixture directly since it drives bot
     # creation through the browser itself, but the roster is the same
     # real, hard-capped, shared table, so any bot created here must still
-    # be fully cleaned up.
+    # be fully cleaned up. Only simulated_players needs deleting (it's
+    # what the 10-bot cap actually counts) -- ledger_entries is
+    # append-only (migrations/versions/b8e4a1f0c3d7_ledger_append_only.py)
+    # and was never load-bearing here. DECISIONS.md, 2026-09-17.
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM ledger_entries WHERE account_id IN (SELECT id FROM accounts WHERE user_id = $1)",
-                user_id,
-            )
-            await conn.execute(
-                "DELETE FROM account_balances WHERE account_id IN (SELECT id FROM accounts WHERE user_id = $1)",
-                user_id,
-            )
-            await conn.execute("DELETE FROM accounts WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM claim_attempts WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM round_winners WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM round_entries WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM simulated_players WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
 async def test_simulated_players_console_full_flow_over_a_real_browser(admin_server, pool, browser):

@@ -36,31 +36,37 @@ async def make_engine(pool, redis, card_pool, room_id) -> RoundEngine:
 
 
 async def _delete_bot_completely(pool, user_id: int) -> None:
-    """Full manual unwind since accounts/users have no ON DELETE CASCADE
-    (deliberately, for real production data): deletes this bot's own
-    ledger_entries/account rows, leaving the *other* side of any funding
-    transaction (e.g. house_float's own entry) in place -- the ledger's
-    sum-to-zero constraint trigger only fires at INSERT time and is never
-    re-checked on DELETE, so this can't trip it, it just leaves a
-    historically "unbalanced-looking" transaction row behind, acceptable
-    for test-database cleanup only, never something production code does.
+    """Frees this bot's roster-cap slot -- the only thing that actually
+    needs to happen for test isolation. services/admin/
+    simulated_players_queries.py's create_simulated_player() enforces the
+    10-bot cap via a bare `SELECT count(*) FROM simulated_players`
+    (no status filter), so a leftover simulated_players row is the one
+    real constraint a test run must not leave behind, or a later test
+    creating a bot starts failing on an exhausted cap it never actually
+    used itself.
+
+    Does NOT touch ledger_entries/account_balances/accounts/users:
+    ledger_entries is append-only (migrations/versions/
+    b8e4a1f0c3d7_ledger_append_only.py), and on inspection none of that
+    was ever load-bearing for test correctness anyway -- nothing in this
+    file (or test_seed_simulated_players_cli.py, or
+    test_simulated_players_console_e2e.py) counts `users`/`accounts`
+    rows globally, `display_name` has no uniqueness constraint, and new
+    bots get fresh negative telegram_ids via MIN(telegram_id)-1
+    regardless of what's left over. Leaving the user/account/ledger rows
+    behind is exactly the same "harmless orphaned test data" every other
+    test file in this suite already relies on (see next_telegram_id()'s
+    own docstring above) -- this helper previously deleted them anyway,
+    out of general tidiness rather than genuine necessity, which is what
+    made it the one place in the whole codebase mutating ledger history
+    directly. See DECISIONS.md, 2026-09-17.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM ledger_entries WHERE account_id IN (SELECT id FROM accounts WHERE user_id = $1)",
-                user_id,
-            )
-            await conn.execute(
-                "DELETE FROM account_balances WHERE account_id IN (SELECT id FROM accounts WHERE user_id = $1)",
-                user_id,
-            )
-            await conn.execute("DELETE FROM accounts WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM claim_attempts WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM round_winners WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM round_entries WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM simulated_players WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
 @pytest.fixture

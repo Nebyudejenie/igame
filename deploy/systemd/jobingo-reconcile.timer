@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightly Arada Bingo ledger reconciliation
+
+[Timer]
+# Daily at 03:30 host time -- after jobingo-backup (02:00) and
+# jobingo-basebackup (Sunday 03:00), before jobingo-prune-wal (04:00), so
+# these don't contend for the same Postgres/disk I/O at once. Adjust to
+# the real production timezone/traffic pattern once known, same as the
+# other timers in this directory. Persistent=true: a reconciliation run
+# missed because the host was down still runs once it's back up, rather
+# than silently skipping a whole night's check.
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

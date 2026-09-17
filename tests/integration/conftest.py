@@ -8,6 +8,7 @@ import uuid
 from decimal import Decimal
 
 import asyncpg
+import pytest
 import pytest_asyncio
 import uvicorn
 
@@ -424,3 +425,27 @@ async def create_room(
         min_winning_lines,
     )
     return row["id"]
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True, loop_scope="session")
+async def _assert_ledger_reconciles_at_suite_end(pool):
+    """Permanent regression guard for the 2026-09-17 incident (see
+    DECISIONS.md and migrations/versions/b8e4a1f0c3d7_ledger_append_only.py):
+    whatever else ran during this test session, the ledger's cached
+    balances must agree with its own entries by the time it ends. Runs
+    once, in teardown, after every other test in the session has already
+    run -- autouse+session-scoped so it applies with zero opt-in from any
+    individual test file, the same reasoning the append-only trigger
+    itself doesn't depend on every future call site remembering to be
+    careful. A failure here means some test (or, as this incident showed,
+    some out-of-band manual action) left the ledger inconsistent -- fix
+    the root cause, never silence this assertion.
+    """
+    yield
+    async with pool.acquire() as conn:
+        mismatches = await ledger.reconcile(conn)
+    assert mismatches == [], (
+        f"ledger.reconcile() found {len(mismatches)} mismatched account(s) at test-suite end: {mismatches!r} -- "
+        "the ledger's cached balances no longer agree with its own entries. This must never be silenced; "
+        "find and fix the root cause (see DECISIONS.md's 2026-09-17 entry for the last time this happened)."
+    )

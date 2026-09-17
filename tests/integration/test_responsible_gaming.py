@@ -316,10 +316,6 @@ async def test_today_net_loss_uses_the_ethiopian_calendar_day_not_utc(pool, conn
 
     before = await responsible_gaming.today_net_loss(conn, user_id)
 
-    txn = await ledger.post(
-        conn, "stake", [ledger.Entry(cash.id, Decimal("-40.00")), ledger.Entry(pot.id, Decimal("40.00"))],
-        idempotency_key=f"tz-boundary-loss-{user_id}",
-    )
     # A fixed "1 hour before UTC midnight" offset only lands in *today's*
     # EAT day when "now" itself isn't within the first ~3 hours of the EAT
     # day (EAT is UTC+3, so that window is UTC 21:00-23:59) -- run this
@@ -331,16 +327,20 @@ async def test_today_net_loss_uses_the_ethiopian_calendar_day_not_utc(pool, conn
     # day by construction, regardless of what wall-clock time this runs at,
     # while still landing on a different *UTC* calendar day than "now"
     # whenever EAT and UTC don't already agree -- the exact cross-boundary
-    # case this test exists to prove.
+    # case this test exists to prove. Computed *before* posting so the
+    # entry can be inserted with this timestamp directly (ledger_entries
+    # is append-only, migrations/versions/b8e4a1f0c3d7_ledger_append_only.py
+    # -- there is no "insert now, backdate after" path any more).
     boundary = (
         await conn.fetchrow(
             "SELECT (date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') "
             "AT TIME ZONE 'Africa/Addis_Ababa') + interval '1 minute' AS ts"
         )
     )["ts"]
-    await conn.execute(
-        "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
-        boundary, txn.id, cash.id,
+    await ledger.post(
+        conn, "stake", [ledger.Entry(cash.id, Decimal("-40.00")), ledger.Entry(pot.id, Decimal("40.00"))],
+        idempotency_key=f"tz-boundary-loss-{user_id}",
+        created_at=boundary,
     )
 
     after = await responsible_gaming.today_net_loss(conn, user_id)

@@ -20,6 +20,10 @@ services:
       # it directly without going through `docker compose exec`. See
       # DECISIONS.md.
       - ../backups/wal_archive:/wal_archive
+      # DEV ONLY -- see that file's own header. Runs once, only against a
+      # genuinely fresh data directory; deliberately not present in
+      # docker-compose.prod.yml at all.
+      - ./postgres-dev-init:/docker-entrypoint-initdb.d
     command:
       - "postgres"
       - "-c"

@@ -12,6 +12,7 @@ even a bug in this file.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from decimal import Decimal
 
@@ -136,7 +137,20 @@ async def post(
     payment_id: int | None = None,
     memo: str | None = None,
     created_by: str = "system",
+    created_at: datetime | None = None,
 ) -> LedgerTransaction:
+    """`created_at`: nearly every caller should leave this None (the
+    column's own `DEFAULT now()` applies) -- the one legitimate
+    exception is a test proving a query buckets by calendar day/timezone
+    boundary correctly, which needs an entry that genuinely originates at
+    a specific historical instant, not one back-dated after the fact.
+    This is an INSERT-time parameter, never a way to retroactively change
+    an existing entry: ledger_entries/ledger_transactions are append-only
+    at the database level (migrations/versions/
+    b8e4a1f0c3d7_ledger_append_only.py) specifically because a prior
+    incident showed the alternative (insert now, UPDATE created_at
+    after) is exactly the kind of history-mutation that invariant exists
+    to prevent."""
     if not entries:
         raise ValueError("post() requires at least one entry")
 
@@ -245,12 +259,13 @@ async def post(
         for entry in entries:
             await conn.execute(
                 """
-                INSERT INTO ledger_entries (transaction_id, account_id, amount)
-                VALUES ($1, $2, $3)
+                INSERT INTO ledger_entries (transaction_id, account_id, amount, created_at)
+                VALUES ($1, $2, $3, COALESCE($4::timestamptz, now()))
                 """,
                 transaction_id,
                 entry.account_id,
                 entry.amount,
+                created_at,
             )
 
         last_entry_id = await conn.fetchval(

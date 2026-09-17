@@ -1117,18 +1117,19 @@ async def test_daily_ggr_attributes_a_near_midnight_utc_entry_to_the_correct_eth
 
     house = await ledger.get_or_create_account(conn, None, "house_revenue")
     provider = await ledger.get_or_create_account(conn, None, "provider_settlement")
-    txn = await ledger.post(
+    boundary_utc = datetime(2026, 8, 25, 23, 30, 0, tzinfo=UTC)
+    # ledger_entries is append-only (migrations/versions/
+    # b8e4a1f0c3d7_ledger_append_only.py) -- this test needs an entry
+    # that genuinely originates at a specific historical instant, which
+    # ledger.post()'s own created_at parameter gives it directly (a fresh
+    # INSERT, both legs sharing the identical timestamp) rather than
+    # inserting at now() and mutating afterward.
+    await ledger.post(
         conn,
         "payout",
         [ledger.Entry(provider.id, Decimal("-42.00")), ledger.Entry(house.id, Decimal("42.00"))],
         idempotency_key=f"tz-boundary-test-{house.id}-{provider.id}-{datetime.now(UTC).timestamp()}",
-    )
-    boundary_utc = datetime(2026, 8, 25, 23, 30, 0, tzinfo=UTC)
-    await conn.execute(
-        "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
-        boundary_utc,
-        txn.id,
-        house.id,
+        created_at=boundary_utc,
     )
 
     after_correct_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 26)))["ggr"])
