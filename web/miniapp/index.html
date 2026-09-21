@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/screens.css" />
   <link rel="stylesheet" href="css/wallet.css" />
+  <link rel="stylesheet" href="css/keno.css" />
   <!-- Inlined, not a linked stylesheet: this must paint on the very first
        frame, with zero chance of a flash of an unstyled logo while
        css/*.css is still in flight over a slow mobile connection --
@@ -155,6 +156,10 @@
           <span class="wallet-fab-label" data-i18n="invite.button"></span>
         </button>
         <button id="voice-settings-btn" class="icon-fab">🔊</button>
+        <button id="open-keno-btn" class="wallet-fab keno-fab">
+          <span aria-hidden="true">🎱</span>
+          <span class="wallet-fab-label" data-i18n="keno.nav_button"></span>
+        </button>
         <button id="open-wallet-btn" class="wallet-fab">
           <svg class="wallet-fab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
             <path d="M3 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.6"/>
@@ -481,6 +486,174 @@
         <button type="button" class="amount-chip" data-filter="lost" data-i18n="wallet.history_filter_lost"></button>
       </div>
       <div id="history-list"></div>
+    </div>
+  </main>
+
+  <!-- Keno: Game Center + board + picks + stake + PLAY + live draw reveal,
+       all one screen -- there's no separate pre-round "lobby" the way
+       Bingo has one, since a Keno round is always either open for bets or
+       drawing; the current round's own status pill *is* the Game Center.
+       Lazy-loaded: js/keno.js is only ever dynamically imported the first
+       time open-keno-btn is pressed (spec 13: "Keno lazy-loaded separately
+       from Bingo"), so its ~80-cell board and WS wiring cost nothing on
+       every other screen. -->
+  <main id="screen-keno" class="screen screen-keno" data-screen="keno">
+    <div class="keno-topbar">
+      <button id="keno-back-btn" class="keno-icon-btn" type="button" aria-label="back">‹</button>
+      <div class="keno-header-title" data-i18n="keno.title"></div>
+      <button id="keno-help-btn" class="keno-icon-btn" type="button" aria-label="help">?</button>
+    </div>
+
+    <div class="keno-status-row">
+      <div id="keno-status-pill" class="keno-status-pill"></div>
+      <div class="keno-jackpot-pill">
+        <span data-i18n="keno.jackpot_label"></span>
+        <span id="keno-jackpot-amount">0.00 ETB</span>
+      </div>
+    </div>
+
+    <div id="keno-board-wrap" class="keno-board-wrap">
+      <div id="keno-board"></div>
+    </div>
+
+    <div id="keno-recent-draws" class="keno-recent-draws"></div>
+
+    <div class="keno-quick-actions">
+      <button id="keno-clear-btn" type="button" class="btn-secondary" data-i18n="keno.clear"></button>
+      <button id="keno-lucky-btn" type="button" class="btn-secondary" data-i18n="keno.lucky_pick"></button>
+      <button id="keno-repeat-btn" type="button" class="btn-secondary" data-i18n="keno.repeat"></button>
+    </div>
+
+    <div class="keno-picks-row">
+      <span id="keno-picks-count">0 / 10</span>
+      <span id="keno-match-counter" class="keno-match-counter hidden"></span>
+    </div>
+
+    <div class="keno-stake-row">
+      <span data-i18n="keno.stake_label"></span>
+      <div id="keno-stake-chips" class="amount-chips"></div>
+    </div>
+
+    <div class="keno-payout-preview">
+      <span data-i18n="keno.potential_payout_label"></span>
+      <span id="keno-payout-amount">0.00 ETB</span>
+    </div>
+
+    <button id="keno-play-btn" type="button" class="btn-primary btn-gold" data-i18n="keno.play_button" disabled></button>
+    <p id="keno-play-status" class="wallet-note"></p>
+
+    <div id="keno-my-tickets-section" class="keno-my-tickets hidden">
+      <p class="keno-section-label" data-i18n="keno.my_tickets_label"></p>
+      <div id="keno-my-tickets-list"></div>
+    </div>
+
+    <div class="keno-footer-links">
+      <button id="keno-paytable-btn" type="button" class="link-btn" data-i18n="keno.view_paytable"></button>
+      <button id="keno-history-btn" type="button" class="link-btn" data-i18n="keno.view_history"></button>
+    </div>
+
+    <!-- Zero-knowledge onboarding (spec 13): shown once per device
+         (localStorage-gated by keno.js), three sentences + three simple
+         pictures. "How to play" (keno-help-btn above) reopens this same
+         overlay on demand, any time. -->
+    <div id="keno-onboarding-overlay" class="keno-overlay hidden">
+      <div class="keno-overlay-card">
+        <div id="keno-onboard-steps" class="keno-onboard-steps"></div>
+        <div id="keno-onboard-dots" class="keno-onboard-dots"></div>
+        <div class="keno-overlay-actions">
+          <button id="keno-onboard-skip-btn" type="button" class="link-btn" data-i18n="keno.onboard_skip"></button>
+          <button id="keno-onboard-next-btn" type="button" class="btn-primary" data-i18n="keno.onboard_next"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Paytable, always reachable in-app (spec 13) -->
+    <div id="keno-paytable-overlay" class="keno-overlay hidden">
+      <div class="keno-overlay-card">
+        <div class="keno-overlay-header">
+          <span data-i18n="keno.paytable_title"></span>
+          <button id="keno-paytable-close-btn" type="button" class="keno-icon-btn" aria-label="close">✕</button>
+        </div>
+        <div id="keno-paytable-picks-tabs" class="amount-chips"></div>
+        <div id="keno-paytable-rows" class="keno-paytable-rows"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Keno result: WIN / LOSE, matching #screen-result's own shape and
+       reusing its confetti/fairness-panel CSS classes verbatim (see
+       css/keno.css). A distinct screen from #screen-result, not a shared
+       one -- Bingo's result carries winner-pill/card-preview concepts
+       that don't apply to a Keno ticket at all. -->
+  <main id="screen-keno-result" class="screen result-screen" data-screen="keno-result">
+    <div id="keno-result-confetti" class="result-confetti" aria-hidden="true"></div>
+    <div id="keno-result-title" class="result-title"></div>
+    <div id="keno-result-amount" class="result-amount"></div>
+    <div id="keno-result-meta" class="result-meta"></div>
+    <div class="result-actions">
+      <button id="keno-play-again-btn" class="btn-primary btn-gold" data-i18n="keno.play_again"></button>
+      <button id="keno-result-verify-btn" class="btn-secondary" data-i18n="result.verify_draw"></button>
+    </div>
+    <div id="keno-fairness-panel" class="fairness-panel hidden">
+      <div class="fairness-row">
+        <span data-i18n="fairness.verified_label"></span>
+        <span id="keno-fairness-verified"></span>
+      </div>
+      <div class="fairness-row">
+        <span data-i18n="fairness.seed_hash_label"></span>
+        <span id="keno-fairness-hash" class="fairness-value"></span>
+      </div>
+      <div class="fairness-row">
+        <span data-i18n="fairness.seed_label"></span>
+        <span id="keno-fairness-seed" class="fairness-value"></span>
+      </div>
+      <p class="wallet-note" data-i18n="fairness.explainer"></p>
+      <button id="keno-fairness-close-btn" class="btn-secondary" data-i18n="fairness.close"></button>
+    </div>
+  </main>
+
+  <!-- Keno history/stats: its own keno-history-tab* classes, deliberately
+       NOT wallet.css's own .wallet-tab -- app.v6.js wires a real, global
+       `document.querySelectorAll(".wallet-tab")` click handler
+       (switchToWalletTab()) with no #screen-wallet scoping, so reusing
+       that exact class name here made Bingo's own handler double-fire on
+       these elements too and crash reaching for a #wallet-pane-* id that
+       was never going to exist for a Keno tab -- a real bug this
+       session's own e2e test caught. The visual styling (see keno.css)
+       is copied from .wallet-tabs/.wallet-tab rather than shared, since
+       app.v6.js's selector means that class name isn't safely reusable
+       as-is. -->
+  <main id="screen-keno-history" class="screen" data-screen="keno-history">
+    <div class="wallet-header">
+      <h2 data-i18n="keno.history_title"></h2>
+      <button id="keno-history-back-btn" type="button">✕</button>
+    </div>
+    <div class="keno-history-tabs">
+      <div class="keno-history-tab active" data-tab="rounds" data-i18n="keno.tab_rounds"></div>
+      <div class="keno-history-tab" data-tab="tickets" data-i18n="keno.tab_my_tickets"></div>
+      <div class="keno-history-tab" data-tab="stats" data-i18n="keno.tab_stats"></div>
+      <div class="keno-history-tab" data-tab="hotcold" data-i18n="keno.tab_hot_cold"></div>
+    </div>
+    <div id="keno-history-pane-rounds" class="keno-history-pane">
+      <div id="keno-history-rounds-list"></div>
+    </div>
+    <div id="keno-history-pane-tickets" class="keno-history-pane hidden">
+      <div id="keno-history-tickets-list"></div>
+    </div>
+    <div id="keno-history-pane-stats" class="keno-history-pane hidden">
+      <div id="keno-history-stats-grid" class="keno-stats-grid"></div>
+    </div>
+    <div id="keno-history-pane-hotcold" class="keno-history-pane hidden">
+      <div class="keno-hotcold-row">
+        <div>
+          <p class="keno-section-label" data-i18n="keno.hottest_label"></p>
+          <div id="keno-hottest-numbers" class="keno-number-chip-row"></div>
+        </div>
+        <div>
+          <p class="keno-section-label" data-i18n="keno.coldest_label"></p>
+          <div id="keno-coldest-numbers" class="keno-number-chip-row"></div>
+        </div>
+      </div>
     </div>
   </main>
 

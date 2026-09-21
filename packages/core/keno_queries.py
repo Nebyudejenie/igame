@@ -7,6 +7,7 @@ this codebase already follows.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -39,6 +40,8 @@ async def game_center_state(pool: asyncpg.Pool) -> dict[str, Any] | None:
         recent_draw = round_row["drawn_numbers"]
 
     assert tier is not None and config is not None
+    max_picks = min(config["max_picks"], tier["max_pick_count"])
+    paytable = await paytable_grid(pool, max_picks=max_picks, profile=tier["paytable_profile"])
     return {
         "round_id": round_row["id"],
         "status": round_row["status"],
@@ -49,7 +52,7 @@ async def game_center_state(pool: asyncpg.Pool) -> dict[str, Any] | None:
         "reveal_index": round_row["reveal_index"],
         "drawn_numbers": list(recent_draw) if recent_draw is not None else None,
         "min_picks": config["min_picks"],
-        "max_picks": min(config["max_picks"], tier["max_pick_count"]),
+        "max_picks": max_picks,
         "stake_options": [str(s) for s in tier["stake_options"]],
         "max_win_per_ticket": str(tier["max_win_per_ticket"]),
         "tier_number": tier["tier_number"],
@@ -57,7 +60,27 @@ async def game_center_state(pool: asyncpg.Pool) -> dict[str, Any] | None:
         "betting_seconds": config["betting_seconds"],
         "draw_seconds": config["draw_seconds"],
         "result_seconds": config["result_seconds"],
+        "paytable": paytable,
     }
+
+
+async def paytable_grid(pool: asyncpg.Pool, *, max_picks: int, profile: str) -> dict[str, dict[str, str]]:
+    """Every pick-count's full {matches: multiplier} table for the round's
+    own pinned tier profile, in one payload -- Part 13's "potential payout
+    for the current selection updates live from the server-provided
+    paytable" and "paytable readable in-app" both need the whole grid up
+    front (picking a stake or a pick count must never cost a round-trip),
+    not a single pick_count's row the way keno_config.load_active_paytable
+    already reads it for ticket placement."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (pick_count) pick_count, multipliers FROM keno_paytables "
+            "WHERE pick_count BETWEEN 1 AND $1 AND profile = $2 AND effective_from <= now() "
+            "ORDER BY pick_count, effective_from DESC",
+            max_picks,
+            profile,
+        )
+    return {str(row["pick_count"]): json.loads(row["multipliers"]) for row in rows}
 
 
 async def _jackpot_balance(conn: ledger.AsyncpgConnection) -> Decimal:

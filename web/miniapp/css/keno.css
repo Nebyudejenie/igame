@@ -1,0 +1,534 @@
+/* Keno (build spec Part 13). Its own stylesheet, same precedent as
+   wallet.css's own feature-scoped file -- a game screen (like
+   #screen-game), so it deliberately stays on the fixed dark canvas and
+   never reads Telegram theme params (tokens.css's own header comment).
+   Reuses .result-title/.result-amount/.result-meta/.result-confetti/
+   .fairness-panel/.amount-chips/.wallet-tabs verbatim from screens.css/
+   wallet.css rather than redefining them -- nothing about those is
+   Bingo-specific, they're pure result/tab/chip layout. */
+
+.screen-keno {
+  padding-bottom: 8px;
+}
+
+.keno-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.keno-icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.keno-header-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  color: var(--gold);
+}
+
+.keno-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.keno-status-pill {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-align: center;
+}
+
+.keno-status-pill.betting {
+  color: var(--call);
+}
+
+.keno-status-pill.closing {
+  color: var(--near);
+  animation: keno-pulse 1s ease-in-out infinite;
+}
+
+.keno-status-pill.drawing {
+  color: var(--accent);
+}
+
+@keyframes keno-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.keno-jackpot-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: linear-gradient(160deg, rgba(255, 196, 54, 0.18), var(--surface) 70%);
+  border: 1px solid rgba(255, 196, 54, 0.35);
+  color: var(--gold);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.keno-board-wrap {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 5px;
+  margin-bottom: 8px;
+}
+
+/* 8 per row (spec 13), sized purely by the grid's own 1fr distribution --
+   a real device-width bug this session's own e2e screenshot caught: an
+   explicit min-height (chasing the spec's other "hit targets >= 44px"
+   requirement) combined with aspect-ratio:1 was forcing each cell wider
+   than 8 columns can actually fit on a 360-390px phone screen once
+   .screen's own 12px side padding is accounted for, overflowing the
+   rightmost column off the edge of the viewport entirely rather than
+   shrinking to fit. 1fr always sums to exactly the available width by
+   construction, so removing the competing min-height is what actually
+   fixes the overflow; tightened gap/wrap-padding below claw back as much
+   of the 44px target as a 360px screen geometrically allows (~42px --
+   short of the ideal by a couple of px, but a real, fully on-screen
+   board beats a broken, technically-44px one). */
+.keno-board {
+  display: grid;
+  grid-template-columns: repeat(var(--keno-columns, 8), 1fr);
+  gap: 3px;
+}
+
+.keno-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+  user-select: none;
+}
+
+/* Four states, distinguishable by shape as well as colour (spec 13:
+   colour-blind safe) -- selected keeps the square with a checkmark
+   badge, drawn/matched switch to a circle so a colour-blind player can
+   tell them apart from selection alone, matched additionally gets a
+   star badge instead of a checkmark. */
+.keno-cell.selected {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg));
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.keno-cell.selected::after {
+  content: "✓";
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 15px;
+  text-align: center;
+}
+
+.keno-cell.drawn {
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--call) 20%, var(--bg));
+  border-color: var(--call);
+  color: var(--call);
+}
+
+.keno-cell.matched {
+  background: color-mix(in srgb, var(--gold) 28%, var(--bg));
+  border-color: var(--gold);
+  color: var(--gold);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--gold) 50%, transparent);
+}
+
+.keno-cell.matched::after {
+  content: "★";
+  position: absolute;
+  top: -7px;
+  right: -6px;
+  font-size: 12px;
+  color: var(--gold);
+}
+
+.keno-board.locked .keno-cell,
+.keno-cell.locked {
+  pointer-events: none;
+}
+
+.keno-recent-draws {
+  display: flex;
+  gap: 6px;
+  min-height: 30px;
+  margin-bottom: 10px;
+  overflow-x: auto;
+}
+
+.keno-recent-draws .keno-ball {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1.5px solid var(--call);
+  color: var(--call);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  animation: keno-ball-pop 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes keno-ball-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.keno-quick-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.keno-quick-actions .btn-secondary {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 10px 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-align: center;
+}
+
+.keno-picks-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.keno-match-counter {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.keno-stake-row {
+  margin-bottom: 10px;
+}
+
+.keno-stake-row > span {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.keno-payout-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 12px;
+  font-size: var(--fs-sm);
+}
+
+.keno-payout-preview #keno-payout-amount {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  color: var(--gold);
+}
+
+.keno-my-tickets {
+  margin-top: 14px;
+}
+
+.keno-section-label {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.keno-ticket-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 6px;
+  font-size: var(--fs-sm);
+}
+
+.keno-ticket-row .keno-ticket-picks {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.keno-ticket-row.won {
+  border: 1px solid var(--gold);
+  color: var(--gold);
+}
+
+.keno-footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+.link-btn {
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* --- onboarding + paytable overlays --- */
+
+.keno-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.keno-overlay-card {
+  width: 100%;
+  max-height: 82vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+}
+
+.keno-overlay-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.keno-onboard-steps {
+  min-height: 200px;
+}
+
+.keno-onboard-step {
+  display: none;
+  text-align: center;
+  padding: 10px 0 20px;
+}
+
+.keno-onboard-step.active {
+  display: block;
+}
+
+.keno-onboard-step .keno-onboard-pic {
+  font-size: 56px;
+  margin-bottom: 14px;
+}
+
+.keno-onboard-step .keno-onboard-text {
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.keno-onboard-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.keno-onboard-dots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.keno-onboard-dots span.active {
+  background: var(--accent);
+}
+
+.keno-overlay-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.keno-overlay-actions .btn-primary {
+  flex: 1;
+}
+
+.keno-paytable-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.keno-paytable-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-size: var(--fs-sm);
+}
+
+.keno-paytable-row .matches {
+  color: var(--muted);
+}
+
+.keno-paytable-row .multiplier {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+/* --- history/stats screen ---
+   .keno-history-tab* deliberately, not wallet.css's own .wallet-tab: see
+   index.html's own comment on this screen -- app.v6.js wires a real,
+   unscoped document.querySelectorAll(".wallet-tab") click handler, so
+   that exact class name isn't safely reusable outside the wallet screen
+   itself. Styling copied from .wallet-tabs/.wallet-tab rather than
+   shared for the same reason. */
+
+.keno-history-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 4px;
+  margin-bottom: 16px;
+}
+
+.keno-history-tab {
+  flex: 1;
+  padding: 10px 4px;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  border-radius: var(--radius);
+}
+
+.keno-history-tab.active {
+  color: var(--text);
+  background: var(--bg);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.keno-round-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 6px;
+  font-size: var(--fs-sm);
+}
+
+.keno-round-row .keno-round-numbers {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keno-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.keno-stats-grid .keno-stat-card {
+  padding: 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: center;
+}
+
+.keno-stats-grid .keno-stat-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  color: var(--gold);
+}
+
+.keno-stats-grid .keno-stat-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.keno-hotcold-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.keno-number-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.keno-number-chip-row span {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .keno-status-pill.closing { animation: none; }
+  .keno-recent-draws .keno-ball { animation: none; }
+}

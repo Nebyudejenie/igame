@@ -104,6 +104,14 @@ async def test_api_keno_state_reflects_the_real_open_round(gateway_server, pool,
     assert body["status"] == "betting_open"
     assert "10.00" in body["stake_options"]
     assert body["min_picks"] == 1
+    # Part 13's live potential-payout preview needs the whole grid up
+    # front, not a per-pick_count round trip. The shared dev database
+    # accumulates other pick counts' real paytable rows for this same
+    # 'low_variance' profile from other tests/seed data -- checking the
+    # one row _seed_open_round itself inserted (pick_count=1) is what
+    # keeps this robust against that ambient data, the same discipline
+    # this suite's other shared-database tests already use.
+    assert body["paytable"]["1"] == {"1": "3.40"}
 
 
 async def test_place_ticket_over_http_debits_real_balance(gateway_server, pool, conn):

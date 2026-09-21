@@ -12011,3 +12011,79 @@ showed the schema itself was never actually wrong.
     directory`. An artifact of two checkouts sharing one Postgres
     container in this dev session, not a code defect — doesn't occur in
     the one-checkout topology any real deployment uses.
+
+## 2026-09-21 — Keno Mini App UI (build spec Part 13) — a real round-tracking
+## bug the session's own e2e test caught, not a hypothetical one
+
+Built the player-facing Keno screens (`web/miniapp/js/keno.js`,
+`render/kenoBoard.js`, `css/keno.css`, plus the three new screens in
+index.html): the 80-number picker board, live draw reveal, win/lose
+result screen with confetti and fairness verification, zero-knowledge
+onboarding, an in-app paytable, and a history/stats screen. Dynamically
+`import()`ed on first press of the header's Keno button (spec 13: "Keno
+lazy-loaded separately from Bingo"), never paid for by a Bingo-only
+player. `packages/core/keno_queries.py::game_center_state()` gained a
+`paytable` field (the full `{matches: multiplier}` grid for every pick
+count, not one row) so the live potential-payout preview and in-app
+paytable never need a round-trip per selection change.
+
+**A real, timing-dependent bug, found only because the UI was proven
+against the genuine round engine, not a mock**: `keno_round_engine.py`'s
+own settlement deliberately overlaps with the *next* round's betting
+phase (its own comment: "runs as a background task, overlapping with the
+next round's own betting phase"). The first version of this UI tracked
+"my tickets this round" as one flat list/Set, keyed to nothing but the
+frontend's own `currentRound` variable. Once a round's settlement (and
+its `keno.ticket.settled` events) landed late enough to overlap the next
+round's `keno.betting.open` — routine given the overlap is by design, not
+an edge case — `currentRound` had already moved on, so the result screen
+captured the *new*, still-open round's id instead of the one the
+settling ticket actually belonged to. Symptom: "Verify draw" on a real
+win claimed the round "hasn't finished yet," for a round that had, provably,
+already completed. Caught by `tests/integration/test_keno_miniapp_e2e.py`
+— a real browser against a real `KenoRoundEngine.run_forever()` with fast
+(sub-10s) round timings, real enough for the overlap to actually occur on
+a normal run, not just a contrived one. Fixed by scoping ticket tracking
+per round id (`roundTickets: Map<round_id, {tickets, pendingIds,
+settled}>`) instead of one undifferentiated bucket, and deriving the
+result screen's round id from the settlement payload's own `round_id`
+field, never from whatever `currentRound` currently happens to hold.
+
+**Two real, screenshot-caught layout bugs, same session**: the 8-column
+board's cells had an explicit `min-height: 44px` (chasing spec 13's own
+"hit targets ≥44px") stacked on `aspect-ratio: 1` — incompatible with 8
+columns actually fitting a 360-390px phone screen once `.screen`'s own
+padding is subtracted; the rightmost column rendered off-screen entirely
+rather than shrinking. Fixed by removing the competing `min-height` and
+letting the grid's own `1fr` distribution size cells (CSS Grid's `1fr`
+always sums to exactly the available width by construction) — lands
+around 42px per cell on the narrowest tested width, short of the ideal by
+a couple of px but genuinely on-screen. Separately, the Clear/Lucky
+Pick/Repeat buttons had no `background` at all (`.btn-secondary` has no
+base rule anywhere in this codebase — every existing use, including
+Bingo's own result screen, sets its own background inline) — invisible
+button affordance, not a contrast bug as first suspected. Both caught by
+reading the e2e test's own `page.screenshot()` output, not just its
+pass/fail result.
+
+**A third real bug, also e2e-caught**: `#screen-keno-history`'s tabs
+initially reused wallet.css's own `.wallet-tab` class purely for
+styling convenience. `app.v6.js` already wires a real, page-wide
+`document.querySelectorAll(".wallet-tab")` click handler with no
+`#screen-wallet` scoping — reusing that class name made Bingo's own
+handler double-fire on these new elements and crash reaching for a
+`#wallet-pane-*` id that was never going to exist for a Keno tab. Fixed
+with Keno's own `.keno-history-tab`/`.keno-history-pane` classes
+(styling duplicated from wallet.css's `.wallet-tab`, a few lines, rather
+than fixing app.v6.js's own long-standing unscoped selector) — cheaper
+and lower-risk than touching Bingo's existing, working code to
+accommodate a second, unplanned consumer of a name it was never scoped
+for.
+
+Deliberately deferred, not fabricated as done: per-number voice-over
+audio for Keno's own draws (`voice.js`'s `VoiceCaller` is hardcoded to
+Bingo's B/I/N/G/O 1-75 letter+number clip scheme; Keno's plain 1-80 draws
+would need a parallel 80-clip set generated the same way
+`generate_call_audio.py` produced Bingo's own 75) and the onboarding
+overlay's "three pictures" (large emoji stand in for real illustrations —
+no design assets exist in this repo to source real ones from).

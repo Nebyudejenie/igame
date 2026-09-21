@@ -6,7 +6,7 @@ const state = {
   connection: "connecting", // connecting | connected | reconnecting | offline | auth_failed | connect_failed
   user: null, // {id, name, balance}
   serverTimeOffsetMs: 0, // server_time - Date.now(), refreshed on every message that carries one
-  screen: "rooms", // rooms | lobby | game | result | wallet
+  screen: "rooms", // rooms | lobby | game | result | wallet | keno | keno-result | keno-history
   rooms: [],
   onlineCount: 0, // real WebSocket headcount from the server's own "rooms" push, never bots
   currentRoomId: null,

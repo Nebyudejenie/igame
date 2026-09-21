@@ -1535,6 +1535,16 @@ document.querySelectorAll(".wallet-tab").forEach((tabEl) => {
   tabEl.addEventListener("click", () => switchToWalletTab(tabEl.dataset.tab));
 });
 
+// Keno (build spec Part 13): dynamically imported only on first press --
+// "Keno lazy-loaded separately from Bingo" (spec 13) -- so its board/WS
+// -handler weight is never paid by a player who only ever plays Bingo.
+// A repeat click after the first is instant: ES module imports are
+// singleton-cached, so this never re-fetches keno.js.
+el("open-keno-btn").addEventListener("click", async () => {
+  const keno = await import("./keno.js");
+  await keno.enter();
+});
+
 el("open-wallet-btn").addEventListener("click", openWallet);
 el("wallet-back-btn").addEventListener("click", () => showScreen("rooms"));
 el("wallet-status-toggle").addEventListener("click", toggleWalletBreakdown);
@@ -2087,6 +2097,13 @@ if (tg) {
       showScreen("rooms");
     } else if (state.screen === "result") {
       showScreen("rooms");
+    } else if (state.screen.startsWith("keno")) {
+      // keno.js owns its own three screens' back-navigation (keno ->
+      // rooms, keno-result/keno-history -> keno) -- by the time any of
+      // them is on screen it's already loaded, so this dynamic import
+      // resolves instantly from the module cache rather than statically
+      // coupling this always-loaded shell to a lazy-loaded feature.
+      import("./keno.js").then((keno) => keno.handleBack());
     }
     // showScreen("rooms") now does send a real WebSocket message: it
     // unsubscribes this connection from the room's live broadcasts (see

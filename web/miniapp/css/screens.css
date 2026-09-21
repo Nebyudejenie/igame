@@ -126,6 +126,17 @@
   color: #1a1200;
 }
 
+/* Keno's own header entry point -- --near (amber), distinct from both
+   the wallet fab's --accent and the invite fab's --gold so it reads as
+   its own thing in the header row, not a variant of either. */
+.keno-fab {
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, #fff 30%, transparent), transparent 60%),
+    var(--near);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--near) 55%, transparent);
+  color: #1a1200;
+}
+
 .invite-panel-title {
   font-size: var(--fs-sm);
   font-weight: 700;
