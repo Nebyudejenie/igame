@@ -23,6 +23,7 @@ from redis.asyncio import Redis
 from packages.core import metrics, rate_limit, telegram_auth
 from packages.core.ledger import user_balance_snapshot
 from packages.core.telegram_auth import InvalidInitData
+from services.admin.simulated_players_queries import active_simulated_player_count
 from services.engine import commands
 from services.engine.commands import CommandTimeout
 from services.gateway import queries
@@ -61,12 +62,20 @@ class ConnectionHandler:
         redis: Redis,
         hub: FanoutHub,
         bot_token: str,
+        connections: set[ConnectionHandler],
     ) -> None:
         self._ws = websocket
         self._pool = pool
         self._redis = redis
         self._hub = hub
         self._bot_token = bot_token
+        # The same set services/gateway/app.py's ws_endpoint adds/removes
+        # this handler from -- a live headcount of real people with the
+        # app open right now (never bots: simulated players act purely
+        # through services.engine.commands.send_command(), no WebSocket
+        # of their own), read on demand rather than tracked separately,
+        # so it can never drift from the actual set of open connections.
+        self._connections = connections
 
         self._user_id: int | None = None
         self._auto_mark_preference: bool = True
@@ -210,7 +219,21 @@ class ConnectionHandler:
             )
         elif t == "rooms":
             rooms = await queries.list_rooms(self._pool)
-            await self._ws.send_text(json.dumps({"t": "rooms", "rooms": rooms}))
+            # Real WebSocket connections plus active-but-idle-or-playing
+            # simulated players -- a bot never opens a WebSocket of its
+            # own, so without this it stayed invisible in "online" the
+            # entire time it wasn't actually seated in a round (see
+            # active_simulated_player_count()'s own docstring).
+            simulated_online = await active_simulated_player_count(self._pool)
+            await self._ws.send_text(
+                json.dumps(
+                    {
+                        "t": "rooms",
+                        "rooms": rooms,
+                        "online_count": len(self._connections) + simulated_online,
+                    }
+                )
+            )
         elif t == "join":
             await self._handle_join(frame)
         elif t == "leave":
@@ -294,7 +317,19 @@ class ConnectionHandler:
                 room_id,
                 ack_name="claim",
                 action="claim",
-                payload={"card_no": card_no},
+                # round_id rides along in the payload purely so the
+                # claim_result reply below can echo it back -- the engine's
+                # own claim() only ever reads card_no from this dict
+                # (round_engine.py's _handle_command), so this extra key is
+                # inert to it. Without it, claim_result carried no
+                # identifying field at all: card_no alone isn't unique
+                # across rooms (the card pool is a shared 1..N range every
+                # room deals from independently), so a stale false-claim
+                # reply for a card just left behind in one room could
+                # match, and incorrectly shake/reject, an identically
+                # -numbered card genuinely held in whatever room the
+                # player has since switched to.
+                payload={"card_no": card_no, "round_id": round_id},
                 bucket=rate_limit.CLAIM,
             )
         elif t == "mark":
@@ -316,6 +351,22 @@ class ConnectionHandler:
             await self._send_error("bad_room_id", "room_id required.", "የክፍል መለያ ያስፈልጋል።")
             return
         assert self._user_id is not None
+        # Structurally enforce "one connection watches at most one room at a
+        # time" here, at the one place a subscription is actually created,
+        # rather than leaving it to every client-side navigation path to
+        # remember to send its own "leave" first. A real production bug
+        # (a player browsing several rooms in one session saw a fast,
+        # unattended room's own calls bleed into whatever room they were
+        # actually looking at) traced back to exactly this: nothing here
+        # ever stopped self._joined_rooms from accumulating more than one
+        # room, so a client that forgot -- or, as later found, one that
+        # simply couldn't yet, because it hadn't finished its first join
+        # before starting a second one -- left this connection subscribed
+        # to both forever. No real caller (client or test) ever relies on
+        # one connection being subscribed to more than one room at once.
+        for stale_room_id in list(self._joined_rooms - {room_id}):
+            self._joined_rooms.discard(stale_room_id)
+            self._hub.unsubscribe_room(stale_room_id, self._cq)
         self._joined_rooms.add(room_id)
         self._hub.subscribe_room(room_id, self._cq)
         state = await queries.build_state_sync(self._pool, room_id, self._user_id)
@@ -389,13 +440,25 @@ class ConnectionHandler:
                             "valid": result.ok,
                             "reason": result.reason,
                             "card_no": payload.get("card_no"),
+                            "round_id": payload.get("round_id"),
                         }
                     )
                 )
             else:
+                # room_id (already this method's own first parameter, no
+                # extra plumbing needed) lets the client tell a take_card/
+                # drop_card/set_auto ack for a room it has since navigated
+                # away from apart from one for the room it's actually in --
+                # same reasoning as claim_result's own round_id above.
                 await self._ws.send_text(
                     json.dumps(
-                        {"t": "ack", "for": ack_name, "ok": result.ok, "reason": result.reason}
+                        {
+                            "t": "ack",
+                            "for": ack_name,
+                            "ok": result.ok,
+                            "reason": result.reason,
+                            "room_id": room_id,
+                        }
                     )
                 )
 

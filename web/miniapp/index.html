@@ -150,6 +150,10 @@
         <span class="amount" id="balance-amount">-- ETB</span>
       </div>
       <div class="header-actions">
+        <button id="invite-btn" class="wallet-fab invite-fab">
+          <span aria-hidden="true">🎁</span>
+          <span class="wallet-fab-label" data-i18n="invite.button"></span>
+        </button>
         <button id="voice-settings-btn" class="icon-fab">🔊</button>
         <button id="open-wallet-btn" class="wallet-fab">
           <svg class="wallet-fab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
@@ -160,6 +164,23 @@
           <span class="wallet-fab-label" data-i18n="wallet.title"></span>
         </button>
       </div>
+    </div>
+    <div class="rooms-activity-row">
+      <span class="rooms-activity-pill">
+        <span class="rooms-activity-dot online"></span>
+        <span id="rooms-online-count">0</span>
+        <span data-i18n="rooms.online_label"></span>
+      </span>
+      <span class="rooms-activity-pill">
+        <span class="rooms-activity-dot playing"></span>
+        <span id="rooms-playing-count">0</span>
+        <span data-i18n="rooms.playing_count_label"></span>
+      </span>
+    </div>
+    <div id="invite-panel" class="voice-settings-panel hidden">
+      <p class="invite-panel-title" data-i18n="invite.panel_title"></p>
+      <p id="invite-count" class="invite-count"></p>
+      <button id="invite-share-btn" class="btn-secondary" data-i18n="invite.share_button"></button>
     </div>
     <div id="voice-settings-panel" class="voice-settings-panel hidden">
       <div class="voice-settings-row">
@@ -236,7 +257,12 @@
 
     <div id="spectate-banner" class="spectate-banner hidden">
       <p data-i18n="spectate.banner"></p>
-      <button id="reserve-card-btn" class="btn-primary" style="margin-top:8px" data-i18n="spectate.reserve"></button>
+      <div id="announcement-marquee" class="announcement-marquee hidden">
+        <div class="announcement-marquee-track">
+          <span id="announcement-marquee-text"></span>
+          <span id="announcement-marquee-text-repeat" aria-hidden="true"></span>
+        </div>
+      </div>
     </div>
 
     <!-- Single-column-of-calls on the left, everything the player watches

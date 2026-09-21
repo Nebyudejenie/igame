@@ -26,6 +26,7 @@ from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
 from services.admin import (
+    announcement_queries,
     auth,
     bonus_queries,
     bot_content_queries,
@@ -2323,6 +2324,42 @@ async def stop_all_simulated_players(
     try:
         return await simulated_players_queries.stop_all_simulated_players_admin(
             app.state.pool, admin_id=admin.admin_id, reason=body.reason, ip_address=_client_ip(request)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# --- platform announcement (Mini App scrolling banner) --------------------
+
+
+@app.get("/announcement")
+async def get_announcement(
+    admin: Annotated[AdminSession, Depends(require("announcement:view"))],
+) -> dict[str, Any]:
+    return await announcement_queries.get_announcement_admin(app.state.pool)
+
+
+class UpdateAnnouncementRequest(BaseModel):
+    text: str
+    enabled: bool
+    reason: str
+
+
+@app.patch("/announcement")
+async def update_announcement(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("announcement:manage"))],
+    body: UpdateAnnouncementRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await announcement_queries.update_announcement_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            text=body.text,
+            enabled=body.enabled,
+            reason=body.reason,
+            ip_address=_client_ip(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

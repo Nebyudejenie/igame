@@ -34,6 +34,14 @@
   "deposit.provider_error": "Couldn't start your deposit right now. Please try again shortly.",
   "deposit.checkout_ready": "Tap below to complete your {amount} ETB deposit.",
   "deposit.checkout_button": "💳 Pay {amount} ETB",
+  "deposit.telebirr_redeemed": "✅ Deposit received! {amount} ETB added to your balance.",
+  "deposit.telebirr_invalid_reference": "Couldn't read a transaction reference from that message.",
+  "deposit.telebirr_payment_not_found": "We couldn't find a payment with that reference yet. It can take a moment to arrive — please try again shortly, or double-check the message.",
+  "deposit.telebirr_already_redeemed": "This reference has already been used.",
+  "deposit.telebirr_blocked": "This reference can't be redeemed right now. Please contact support.",
+  "deposit.telebirr_disputed": "This reference is under review. Please contact support.",
+  "deposit.telebirr_expired": "This reference has expired.",
+  "deposit.account_banned": "This account can't make deposits right now.",
   "withdraw.not_available": "Withdrawals are launching soon. Please check back shortly.",
   "withdraw.usage": "Usage: /withdraw <amount> <telebirr number> <full name>. Minimum {min} ETB.",
   "withdraw.invalid_amount": "Please enter a valid amount, for example: /withdraw 200 0911223344 Abebe Kebede",
@@ -64,7 +72,7 @@
   "invite.summary": "Your invite link:\n{link}\n\n{count} people have joined so far.",
   "invite.no_username": "Your invite link isn't ready yet. Please try again shortly.",
 
-  "support.info": "Need help? Please reach out to @jobingo_support.",
+  "support.info": "Need help? Please reach out to @AradaBingo_Support.",
   "rules.text": "75-ball Arada Bingo: pick a card, mark it as numbers are called, and call BINGO when you complete a row, column, diagonal, or the four corners. The derash is what's left of the pot after the operator's cut.",
 
   "language.prompt": "Choose your language:",

@@ -151,7 +151,13 @@ async def test_command_ack_histogram_records_a_real_take_card_action(
             for _ in range(20):
                 reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
                 if reply.get("t") == "ack":
-                    assert reply == {"t": "ack", "for": "take_card", "ok": True, "reason": None}
+                    assert reply == {
+                        "t": "ack",
+                        "for": "take_card",
+                        "ok": True,
+                        "reason": None,
+                        "room_id": room_id,
+                    }
                     break
             else:
                 raise AssertionError("never saw the take_card ack")

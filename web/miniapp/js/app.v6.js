@@ -14,10 +14,56 @@ let winPatterns = ["row", "col", "diag"];
 // exactly like winPatterns' own default above, never a hardcoded rule.
 let minWinningLines = 2;
 let countdownTimer = null;
+let lastLobbyCountdownSeconds = null;
+
+// Renders the lobby countdown's gold pulse-per-second, switching to a
+// continuously-pulsing red in the final 3 seconds. Only re-triggers the
+// pulse animation when the integer seconds value actually changes --
+// startLobbyCountdown's own interval ticks every 250ms for a smooth
+// clock, far more often than the displayed number itself changes.
+function renderLobbyCountdown(label, seconds) {
+  label.textContent = t("lobby.starts_in", { seconds });
+  label.classList.toggle("lobby-countdown-urgent", seconds > 0 && seconds <= 3);
+  if (seconds !== lastLobbyCountdownSeconds) {
+    lastLobbyCountdownSeconds = seconds;
+    label.classList.remove("lobby-countdown-tick");
+    void label.offsetWidth; // force reflow so the animation restarts
+    label.classList.add("lobby-countdown-tick");
+  }
+}
 
 // --- screen management --------------------------------------------------
 
 function showScreen(name) {
+  // Real, reported bug: joinRoom() subscribes this connection to a room's
+  // live broadcasts (services/gateway/connection.py's _joined_rooms/
+  // FanoutHub.subscribe_room()) but nothing ever called leaveRoom() to
+  // undo it -- browsing from room to room across a session (create
+  // several rooms, look into each one) kept every previously-viewed
+  // room's subscription alive on top of the new one. ws.on("call")'s own
+  // guard only checks the *screen* name ("game"/"lobby"), never which
+  // room a call actually belongs to, so a still-subscribed room's own
+  // independent call sequence kept overwriting the call badge/count for
+  // whichever room the player was actually looking at -- exactly the
+  // "shows 8 but it's really over 20" symptom this fixes. Every path
+  // back to the room list goes through this one function, so leaving
+  // here (not at each individual call site) closes every one of them at
+  // once, including the round naturally ending and bouncing back on its
+  // own via state_sync.
+  if (name === "rooms") {
+    const { currentRoomId } = getState();
+    if (currentRoomId !== null) ws.leaveRoom(currentRoomId);
+    // Two smaller leaks in the same family, closed at the same spot:
+    // (1) any voice announcements this room already queued but hadn't
+    // played yet would otherwise keep draining and playing *through*
+    // whatever room is entered next, announcing that room's numbers
+    // wrong; (2) the lobby countdown's setInterval (startLobbyCountdown())
+    // is only ever cleared by the *next* one starting, so leaving a
+    // lobby screen without ever opening another one left it ticking
+    // forever in the background.
+    voiceCaller.resetRound();
+    clearInterval(countdownTimer);
+  }
   for (const el of document.querySelectorAll(".screen")) {
     el.classList.toggle("active", el.dataset.screen === name);
   }
@@ -154,7 +200,9 @@ function renderRoomList() {
         <div class="players">🟢 ${room.players}</div>
       </div>
       <div style="text-align:right">
-        <div class="derash-line">${t("rooms.derash_up_to", { amount: room.pot })}</div>
+        <div class="derash-line">${
+          room.status === "running" ? t("rooms.derash_amount", { amount: room.derash }) : ""
+        }</div>
         <div class="countdown">${roomCountdownText(room)}</div>
       </div>
     `;
@@ -184,9 +232,21 @@ function roomCountdownText(room) {
 }
 
 ws.on("rooms", (msg) => {
-  setState({ rooms: msg.rooms });
+  setState({ rooms: msg.rooms, onlineCount: msg.online_count ?? 0 });
+  updateRoomsActivityHeader();
   if (getState().screen === "rooms") renderRoomList();
 });
+
+// "Online" comes straight from the server (a real WebSocket headcount);
+// "Playing" is summed here from each room's own player count rather than
+// asking the server for a second figure -- list_rooms() already carries
+// everything needed for it.
+function updateRoomsActivityHeader() {
+  const state = getState();
+  const playing = state.rooms.reduce((sum, room) => sum + room.players, 0);
+  el("rooms-online-count").textContent = String(state.onlineCount ?? 0);
+  el("rooms-playing-count").textContent = String(playing);
+}
 
 function refreshRoomList() {
   ws.requestRooms();
@@ -232,6 +292,16 @@ function enterRoom(roomId) {
 }
 
 ws.on("state_sync", (msg) => {
+  // Defense in depth alongside the server-side single-room-per-connection
+  // enforcement in services/gateway/connection.py's _handle_join(): a
+  // state_sync for a room this client has already navigated away from can
+  // still be in flight (queued server-side before a "leave" was processed,
+  // or a queue-overflow resync) when it lands here. Applying it blind used
+  // to be able to overwrite state.round with a stranger room's data, or --
+  // worse, for a voided/done sync -- call showScreen("rooms") -> leaveRoom
+  // against whatever room this connection is *actually* in now, silently
+  // kicking the player out of a live round they're still genuinely playing.
+  if (msg.room_id !== getState().currentRoomId) return;
   setState({ round: msg });
   winPatterns = msg.win_patterns || winPatterns;
   minWinningLines = msg.min_winning_lines || minWinningLines;
@@ -433,6 +503,15 @@ ws.on("card_taken", (msg) => {
 
 ws.on("ack", (msg) => {
   if (!msg.ok) showToast(msg.reason || "error.generic");
+  // A take_card ack for a room this client has already left (in flight
+  // when the leave happened) must never touch this room's own
+  // pendingTakeCardAcks counter or trigger a re-join -- enterLobby()
+  // already reset that counter to 0 for whatever room is actually on
+  // screen now, so decrementing it here for a stray ack could drive it
+  // negative-then-clamped or, worse, hit 0 and force a spurious
+  // ws.joinRoom() against the *current* room, restarting its countdown
+  // and rebuilding its lobby DOM out from under the player mid-interaction.
+  if (msg.for === "take_card" && msg.room_id !== getState().currentRoomId) return;
   if (msg.for === "take_card") {
     if (msg.ok) haptics.success();
     // Several take_card commands can be in flight at once (quick taps on
@@ -468,18 +547,20 @@ function startLobbyCountdown(sync) {
   // to action until a real round_start/state_sync hands back a genuine
   // lobby_deadline_ms.
   if (sync.lobby_deadline_ms == null) {
+    label.classList.remove("lobby-countdown-tick", "lobby-countdown-urgent");
     label.textContent = t("lobby.pick_card");
     return;
   }
+  lastLobbyCountdownSeconds = null;
   countdownTimer = setInterval(() => {
     const secondsLeft = Math.max(0, Math.round((sync.lobby_deadline_ms - serverNow()) / 1000));
-    label.textContent = t("lobby.starts_in", { seconds: secondsLeft });
+    renderLobbyCountdown(label, secondsLeft);
   }, 250);
 }
 
 ws.on("lobby_tick", (msg) => {
   if (getState().screen !== "lobby") return;
-  el("lobby-countdown").textContent = t("lobby.starts_in", { seconds: msg.seconds_left });
+  renderLobbyCountdown(el("lobby-countdown"), msg.seconds_left);
   updateLobbyMoneyBar(msg);
 });
 
@@ -627,7 +708,17 @@ function gridNumbers(grid) {
 }
 
 function updateStatStrip(sync) {
-  el("stat-derash").textContent = `${sync.derash || sync.pot || "0.00"} ETB`;
+  // Was `sync.derash || sync.pot || "0.00"`: every server message that
+  // reaches this function always sends derash as a non-empty string
+  // ("0.00" included), and "0.00" is truthy in JS -- so the `|| sync.pot`
+  // fallback could never actually fire, dead code masking a real
+  // server-side bug (state_sync used to always send "0.00" for any round
+  // still in progress; fixed in services/gateway/queries.py::
+  // build_state_sync). Kept as `??`, not `||`, so a genuinely missing
+  // field still falls back safely without ever substituting `pot` (a
+  // different, larger number -- the gross stake, not the payout) mislabeled
+  // as derash.
+  el("stat-derash").textContent = `${sync.derash ?? "0.00"} ETB`;
   el("stat-players").textContent = String(sync.players || "");
   el("stat-stake").textContent = `${sync.stake || ""} ETB`;
   el("stat-call").textContent = `${sync.call_index || 0}/75`;
@@ -655,6 +746,12 @@ ws.on("round_start", (sync) => {
 ws.on("call", (msg) => {
   const state = getState();
   if (state.screen !== "game" && state.screen !== "lobby") return;
+  // Defense in depth alongside the subscription-lifecycle fix in
+  // showScreen() above: a call belongs to exactly one round, so if this
+  // connection is (or ever again becomes, from some future regression)
+  // subscribed to more than one room at once, a stray round's own calls
+  // must never be applied to whatever round is actually on screen.
+  if (!state.round || msg.round_id !== state.round.round_id) return;
   board.markCalled(msg.number);
   const calledSoFar = new Set([...(state.round ? state.round.called || [] : []), msg.number]);
   setState({ round: { ...state.round, called: [...calledSoFar], call_index: msg.index } });
@@ -801,6 +898,16 @@ el("voice-settings-btn").addEventListener("click", () => {
 
 ws.on("claim_result", (msg) => {
   if (msg.valid) return; // the eventual round_end message drives the UI
+  // card_no alone isn't unique across rooms -- every room deals from the
+  // same shared 1..card_pool_size range independently, so a false-claim
+  // reply that arrives late (already in flight when this connection left
+  // that room) could otherwise match an identically-numbered card
+  // genuinely held in whatever room the player has since switched to. The
+  // round this claim was actually for rides along in msg.round_id (see
+  // services/gateway/connection.py's claim dispatch), gating this exactly
+  // like ws.on("call")'s own round-identity guard above.
+  const state = getState();
+  if (!state.round || msg.round_id !== state.round.round_id) return;
   // card_no targets exactly the card that was claimed -- without it, a
   // false claim on one card would reset/shake every held card's button
   // instead of just the one that was actually wrong.
@@ -824,11 +931,97 @@ function enterSpectate(sync) {
   board.markAllCalled(sync.called || []);
   updateStatStrip(sync);
   restoreCallBadge(sync.called || []);
+  renderAnnouncementMarquee();
 }
 
-el("reserve-card-btn").addEventListener("click", () => {
-  const state = getState();
-  if (state.currentRoomId !== null) enterRoom(state.currentRoomId);
+// Replaces the old "Reserve a card" button (services/gateway/app.py's
+// /api/announcement is the admin-configurable source, see
+// announcement_queries.py) -- that button re-synced the whole spectate
+// view for zero real benefit, since join() can't assign a card mid-round
+// and the player auto-advances into the next round regardless. Fetched
+// once at boot, not per spectate entry: this text rarely changes within
+// a single short-lived Mini App session, and re-fetching on every
+// spectate entry would just be another pointless round trip.
+let announcementText = null;
+
+async function fetchAnnouncement() {
+  try {
+    const response = await fetch("/api/announcement", { headers: authHeader() });
+    if (!response.ok) return;
+    const data = await response.json();
+    announcementText = data.text || null;
+  } catch {
+    /* no banner shown -- not critical to any real functionality */
+  }
+}
+
+function renderAnnouncementMarquee() {
+  const marquee = el("announcement-marquee");
+  if (!announcementText) {
+    marquee.classList.add("hidden");
+    return;
+  }
+  el("announcement-marquee-text").textContent = announcementText;
+  el("announcement-marquee-text-repeat").textContent = announcementText;
+  marquee.classList.remove("hidden");
+}
+
+// --- invite / referral ----------------------------------------------------
+//
+// services/bot/handlers.py::cmd_invite() already sends this same
+// ?start=ref_{telegram_id} link + join count over chat, but only to a
+// player who thinks to type /invite there -- this is the same data, one
+// tap away, on the screen every player actually spends their time on.
+// Sharing goes through Telegram's own native share sheet (t.me/share/url,
+// opened via tg.openTelegramLink) rather than a raw copy-paste link: the
+// resulting message uses Telegram's own preview of the bot's profile
+// (name/photo/short description), so it looks like a real invite, not a
+// pasted URL -- one tap fans out to any chat, group, or channel the
+// player picks, with zero server-side involvement in the fan-out itself.
+let inviteLink = null;
+let inviteReferralCount = 0;
+
+async function fetchInviteSummary() {
+  try {
+    const response = await fetch("/api/invite", { headers: authHeader() });
+    if (!response.ok) return;
+    const data = await response.json();
+    inviteLink = data.link || null;
+    inviteReferralCount = data.referral_count || 0;
+  } catch {
+    /* invite panel just shows nothing to share -- not critical to any real functionality */
+  }
+}
+
+el("invite-btn").addEventListener("click", async () => {
+  haptics.lightTap();
+  const panel = el("invite-panel");
+  const opening = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden");
+  if (opening) {
+    // Re-fetched on every open, unlike the announcement text above -- a
+    // friend joining via this exact link is the one thing this panel
+    // exists to show, and it can genuinely change between opens within
+    // the same session.
+    await fetchInviteSummary();
+    el("invite-count").textContent = t("invite.count", { count: inviteReferralCount });
+  }
+});
+
+el("invite-share-btn").addEventListener("click", () => {
+  if (!inviteLink) {
+    showToast("invite.no_link");
+    return;
+  }
+  haptics.mediumTap();
+  const shareUrl =
+    `https://t.me/share/url?url=${encodeURIComponent(inviteLink)}` +
+    `&text=${encodeURIComponent(t("invite.share_text"))}`;
+  if (tg && tg.openTelegramLink) {
+    tg.openTelegramLink(shareUrl);
+  } else {
+    window.open(shareUrl, "_blank");
+  }
 });
 
 // A real production incident, caught on video: a player who took a card
@@ -840,7 +1033,14 @@ el("reserve-card-btn").addEventListener("click", () => {
 // clean bounce back to the room list, not a misleading result screen
 // (unlike round_end, this round never actually started -- there's no
 // "no winner" to report, just "not enough players joined").
-ws.on("round_voided", () => {
+ws.on("round_voided", (msg) => {
+  // Same round-identity guard as ws.on("call")/ws.on("state_sync") above:
+  // this connection should only ever be subscribed to the room currently
+  // on screen, but a stray broadcast for a room already navigated away
+  // from can still be in flight when it lands. Without this, a voided
+  // notice for an abandoned room would bounce the player off a different
+  // room they're actually still watching live.
+  if (!getState().round || msg.round_id !== getState().round.round_id) return;
   showToast("lobby.round_voided_underfilled");
   showScreen("rooms");
   refreshRoomList();
@@ -849,6 +1049,14 @@ ws.on("round_voided", () => {
 // --- result (SETTLING) --------------------------------------------------
 
 ws.on("round_end", (msg) => {
+  // Same round-identity guard as ws.on("call")/ws.on("state_sync")/
+  // ws.on("round_voided") above -- a stray round_end for a room this
+  // connection has already left (but whose broadcast was already in
+  // flight) would otherwise render the wrong room's winners/payout onto
+  // the result screen and corrupt the real-money session reality-check
+  // total below with someone else's round outcome.
+  const preState = getState();
+  if (!preState.round || msg.round_id !== preState.round.round_id) return;
   el("spectate-banner").classList.add("hidden");
   el("your-card-section").classList.remove("hidden");
   el("fairness-panel").classList.add("hidden");
@@ -1079,16 +1287,54 @@ el("fairness-close-btn").addEventListener("click", () => {
 
 // --- wallet --------------------------------------------------------------
 
+// Real reported bug: text on the wallet's Telebirr destination card was
+// unreadable in a real Telegram client, even though it renders correctly
+// here (this file's own stub tests always send an empty themeParams, so
+// none of this code path ever ran against them). Root cause: Telegram's
+// own theme_params object is not guaranteed to supply every color field
+// together -- a client that sends a light bg_color with no matching
+// text_color left this function's old code silently keeping the dark-
+// mode default (near-white) text color in place on top of a newly light
+// background. Computing a guaranteed-contrasting fallback from whichever
+// background color actually won closes this regardless of which fields
+// a given Telegram client happens to send.
+function relativeLuminance(hexColor) {
+  const hex = hexColor.replace("#", "");
+  const channels = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const [r, g, b] = channels.map((c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastingTextColor(bgHexColor) {
+  try {
+    // This app's own light/dark text tokens (tokens.css) -- reusing them
+    // keeps a themed wallet screen's fallback text on-brand instead of a
+    // generic black/white.
+    return relativeLuminance(bgHexColor) > 0.5 ? "#0B0E14" : "#F2F5FA";
+  } catch {
+    return "#F2F5FA"; // an unparseable color is vanishingly unlikely (Telegram always sends #rrggbb), but never crash the wallet over it
+  }
+}
+
 function applyWalletTheme() {
   const wallet = el("screen-wallet");
-  if (tg && tg.themeParams) {
-    const p = tg.themeParams;
-    if (p.bg_color) wallet.style.setProperty("--bg", p.bg_color);
-    if (p.secondary_bg_color) wallet.style.setProperty("--surface", p.secondary_bg_color);
-    if (p.text_color) wallet.style.setProperty("--text", p.text_color);
-    if (p.hint_color) wallet.style.setProperty("--muted", p.hint_color);
-    if (p.button_color) wallet.style.setProperty("--accent", p.button_color);
+  if (!tg || !tg.themeParams) return;
+  const p = tg.themeParams;
+  if (p.bg_color) wallet.style.setProperty("--bg", p.bg_color);
+  if (p.secondary_bg_color) wallet.style.setProperty("--surface", p.secondary_bg_color);
+  const bgForContrast = p.bg_color || p.secondary_bg_color;
+  const fallbackText = bgForContrast ? contrastingTextColor(bgForContrast) : null;
+  if (p.text_color) {
+    wallet.style.setProperty("--text", p.text_color);
+  } else if (fallbackText) {
+    wallet.style.setProperty("--text", fallbackText);
   }
+  if (p.hint_color) {
+    wallet.style.setProperty("--muted", p.hint_color);
+  } else if (fallbackText) {
+    wallet.style.setProperty("--muted", fallbackText);
+  }
+  if (p.button_color) wallet.style.setProperty("--accent", p.button_color);
 }
 
 // The three balance figures the server ever sends (cash/bonus/locked) are
@@ -1396,7 +1642,7 @@ el("deposit-automatic-toggle-btn").addEventListener("click", async () => {
 // this remembers it rather than assuming automatic is always the default.
 let depositSectionBeforeTelebirr = "deposit-automatic-section";
 
-el("deposit-telebirr-toggle-btn").addEventListener("click", () => {
+el("deposit-telebirr-toggle-btn").addEventListener("click", async () => {
   depositSectionBeforeTelebirr = el("deposit-automatic-section").classList.contains("hidden")
     ? "deposit-manual-section"
     : "deposit-automatic-section";
@@ -1404,6 +1650,16 @@ el("deposit-telebirr-toggle-btn").addEventListener("click", () => {
   el("deposit-manual-toggle-btn").classList.add("hidden");
   el("deposit-telebirr-toggle-btn").classList.add("hidden");
   el("deposit-telebirr-section").classList.remove("hidden");
+  // Real gap found alongside the color-contrast bug above: this specific
+  // entry point (Telebirr reached as a secondary option, Chapa still on)
+  // never actually called loadTelebirrDestination() at all -- unlike
+  // every other path into this same section, which left the account
+  // details permanently stuck on "loading" for anyone who got here via
+  // this exact button.
+  if (!telebirrDestinationLoaded) {
+    telebirrDestinationLoaded = true;
+    await loadTelebirrDestination();
+  }
 });
 
 el("deposit-telebirr-back-btn").addEventListener("click", () => {
@@ -1827,13 +2083,24 @@ setInterval(checkSessionReminder, 60000);
 if (tg) {
   tg.BackButton.onClick(() => {
     const state = getState();
-    if (state.screen === "wallet" || state.screen === "lobby") {
+    if (state.screen === "wallet" || state.screen === "lobby" || state.screen === "game") {
       showScreen("rooms");
     } else if (state.screen === "result") {
       showScreen("rooms");
     }
-    // Deliberately not wired to close the app while a round is live
-    // (spec section 3.5): only rooms/lobby/result respond to Back.
+    // showScreen("rooms") now does send a real WebSocket message: it
+    // unsubscribes this connection from the room's live broadcasts (see
+    // showScreen()'s own comment above -- the cross-room call-leak fix).
+    // That's still safe to do from Back: services/gateway/connection.py's
+    // _handle_leave() only ever discards the broadcast subscription, never
+    // round_entries/cards/auto_mark, so the round keeps running and
+    // settling server-side exactly as before -- the player just stops
+    // *watching* it (same real-money outcome as backgrounding the app).
+    // The one thing this does give up is live updates for that round: if
+    // the player doesn't tap back into this room before it ends, they
+    // won't see its round_end here and must check the room again (or their
+    // balance) to find out how it settled, rather than getting a result
+    // screen for a round they've already navigated away from.
   });
 }
 
@@ -1940,6 +2207,12 @@ async function boot() {
   document.getElementById("balance-amount").textContent = `${user.balance} ETB`;
   showScreen("rooms");
   refreshRoomList();
+  fetchAnnouncement();
+  fetchInviteSummary();
+  // Warms the browser's cache for all 75 call clips well before any
+  // room's first call -- see voiceCaller.preloadAll()'s own docstring
+  // for why this specifically helps on a weak connection.
+  voiceCaller.preloadAll();
 
   // Deep link from the bot: /deposit's own "open the wallet" button
   // (services/bot/keyboards.py::open_wallet_keyboard) appends

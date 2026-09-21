@@ -26,10 +26,12 @@ needed.
 ## What each clip should say
 
 `MANIFEST.json` maps every filename to its exact script, e.g.
-`"G_56": "G! ሃምሳ ስድስት!"` — **the letter spoken in English, a short
+`"G_56": "ጂ , ሃምሳ ስድስት"` — **the Bingo letter spoken as its own English
+letter name, spelled phonetically in Amharic script (never a bare Latin
+character -- see "Real TTS findings" below for why), a comma for a
 natural pause, then the number spoken in Amharic.** This is the file to
-hand to a TTS vendor or a voice actor. It's generated from two real
-sources, never hand-typed, so it can't drift from them:
+hand to a TTS vendor or a voice actor. The number words are generated
+from two real sources, never hand-typed, so they can't drift from them:
 
 - the Bingo letter ranges in `packages/core/bingo.py` (`letter_for()`)
 - the Amharic number words in `web/miniapp/js/amharic_numbers.js`
@@ -46,10 +48,45 @@ from packages.core.bingo import letter_for
 words = json.loads(subprocess.run(
     ['node', 'tests/frontend/dump_amharic_numbers.mjs'], capture_output=True, text=True, check=True
 ).stdout)
-manifest = {f'{letter_for(n)}_{n:02d}': f'{letter_for(n)}! {words[str(n)]}!' for n in range(1, 76)}
+LETTER_PREFIX = {'B': 'ቢ', 'I': 'አይ', 'N': 'ኤን', 'G': 'ጂ', 'O': 'ኦ'}  # see 'Real TTS findings' below
+manifest = {
+    f'{letter_for(n)}_{n:02d}': f'{LETTER_PREFIX[letter_for(n)]} , {words[str(n)]}'
+    for n in range(1, 76)
+}
 json.dump(manifest, open('web/miniapp/audio/calls/MANIFEST.json', 'w'), ensure_ascii=False, indent=2, sort_keys=True)
 "
 ```
+
+## Real TTS findings
+
+Two engines were tried, each verified directly (not just guessed from
+listening) by generating real audio and round-tripping it through Addis
+AI's own Speech-to-Text to check what it actually said:
+
+- **Addis AI's TTS API was tried first and rejected.** Exclamation marks
+  made output worse (dropping them helped); worse, a bare `"B"`
+  deterministically triggered an 8-11 second clip of completely
+  unrelated garbled Amharic instead of the letter -- the *same* garbled
+  output every time for the same input, so retrying was never going to
+  fix it. Spelling `"B"` as `"ቢ"` ("bee") helped inconsistently: some
+  B-column numbers came out clean, others (e.g. `"ቢ , አራት"`) still
+  produced the same multi-second hallucination. This turned out to be
+  general instability on short (2-3 word) prompts with that specific
+  voice, not something fixable by rewording.
+- **Microsoft Edge's free Neural TTS (`edge-tts` package, voice
+  `am-ET-AmehaNeural`) is what's actually used.** Every letter spelled
+  phonetically in Amharic (`LETTER_PREFIX` above -- not just `"B"`, on
+  the theory that a bare Latin character is the more fragile input
+  regardless of engine) with a comma pause before the number came back
+  clean and correctly transcribed on every clip spot-checked. No API
+  key needed -- it's a free public Microsoft endpoint.
+- If the voice or engine ever changes again, re-run the same per-clip
+  STT-verified check before trusting a new script is actually correct --
+  this codebase has now hit the same "sounds fine to write, garbles in
+  practice" failure mode once already.
+
+`web/miniapp/audio/calls/generate_call_audio.py` is the real generation
+script.
 
 ## Voice direction
 

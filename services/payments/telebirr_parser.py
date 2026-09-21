@@ -160,6 +160,25 @@ def normalize_reference(raw: str) -> str:
     return raw.strip().upper()
 
 
+def extract_reference(raw: str) -> str | None:
+    """Pulls a bare reference out of free text that might be an entire
+    pasted SMS body rather than just the code -- same anchor phrase,
+    character class, and length bounds as _REFERENCE_RE above, exposed
+    for callers that only need the bare code (never a full
+    parse_telebirr_sms() result), namely services/bot/handlers.py's
+    plain-chat-message redemption path. Deliberately strict (None on no
+    match, never a raw-text fallback): unlike a dedicated reference input
+    field, an ordinary chat message with no match is far more likely to
+    be small talk or a menu button press than a mistyped reference, so a
+    fallback here would misfire on almost everything a player types.
+    web/miniapp/js/app.v6.js's own extractTelebirrReference() mirrors
+    this same regex for its input-field case, where a raw-text fallback
+    *is* safe (everything typed there is already reference-shaped input).
+    """
+    match = _REFERENCE_RE.search(raw)
+    return normalize_reference(match.group(1)) if match else None
+
+
 def _parse_datetime(text: str) -> datetime | ParseFailure:
     match = _DATETIME_RE.search(text)
     if match is None:

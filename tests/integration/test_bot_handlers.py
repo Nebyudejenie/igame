@@ -22,12 +22,14 @@ from aiogram.methods import TelegramMethod
 from aiogram.methods.send_message import SendMessage
 from aiogram.types import Chat, Contact, Message, PhotoSize, TelegramObject, Update, User
 
+from packages.core import ledger
 from packages.core.config import Settings
 from packages.core.phone_crypto import decrypt_phone
 from services.admin import queries as admin_queries
 from services.bot.app import build_dispatcher
 from services.bot.notifier import Notifier
 from services.payments import manual
+from services.payments.telebirr_ingest import ingest_sms_evidence
 from tests.integration.conftest import fund_user, next_telegram_id
 from tests.integration.test_admin_auth import create_test_admin
 
@@ -1256,7 +1258,7 @@ async def test_support_command_sends_the_support_contact(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, "/support"))
     await _settle()
     assert len(session.sent) == 1
-    assert "@jobingo_support" in session.sent[0].text
+    assert "@AradaBingo_Support" in session.sent[0].text
 
 
 async def test_support_button_press_sends_the_support_contact(bot_ctx):
@@ -1272,7 +1274,7 @@ async def test_support_button_press_sends_the_support_contact(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, button_text))
     await _settle()
     assert len(session.sent) == 1
-    assert "@jobingo_support" in session.sent[0].text
+    assert "@AradaBingo_Support" in session.sent[0].text
 
 
 async def test_stale_cached_keyboard_play_and_withdraw_button_text_still_routes(bot_ctx):
@@ -2061,3 +2063,149 @@ async def test_a_configured_analytics_key_relabels_every_command_metric(pool, bo
             reason="test cleanup", ip_address=None,
         )
         command_registry.set_cache({})
+
+
+# --- self-service Telebirr redemption by pasting the SMS in chat, no
+# command needed (services/bot/handlers.py's on_customer_telebirr_paste)
+# -- the same redeem_evidence() the Mini App's own wallet screen already
+# offers (services/payments/telebirr_redemption.py), now reachable by a
+# registered player just pasting their confirmation SMS as an ordinary
+# chat message. ---------------------------------------------------------
+
+
+def _transferred_sms(reference: str, *, amount: str = "10.00") -> str:
+    # Template 2 from services/payments/telebirr_parser.py's own
+    # docstring (the PAYER's own phone, not the recipient's) -- this is
+    # the message a real customer actually has on their own clipboard
+    # after paying, which is the whole point of this feature.
+    return (
+        f"Dear Nebyu You have transferred ETB {amount} to SURAFEL DESALEGNE (2519****0917) "
+        f"on 02/09/2026 07:32:00. Your transaction number is {reference}. The service fee is "
+        "ETB 0.87 and 15% VAT on the service fee is ETB 0.13. Your current E-Money Account "
+        "balance is ETB 385.12. To download your payment information please click this link: "
+        f"https://transactioninfo.ethiotelecom.et/receipt/{reference}. Thank you for using "
+        "telebirr Ethio telecom"
+    )
+
+
+async def _make_available_evidence(pool, *, amount: str = "10.00") -> str:
+    reference = f"DI{next_telegram_id() % 10**8:08d}"
+    recipient = f"Recipient{reference}"
+    await pool.execute(
+        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active) "
+        "VALUES ('telebirr', '0911000000', $1, true)",
+        recipient,
+    )
+    outcome = await ingest_sms_evidence(
+        pool,
+        raw_sms=(
+            f"Dear {recipient} \n"
+            f"You have received ETB {amount} from DAWIT WERKALEMAHU(2519****6294)  on "
+            f"04/09/2026 10:27:23. Your transaction number is {reference}. Your current "
+            "E-Money Account balance is ETB 252.12.\nThank you for using telebirr\nEthio telecom"
+        ),
+        source="macrodroid", source_ref="test-device",
+    )
+    assert outcome.status == "ingested_available"
+    return reference
+
+
+async def _set_telebirr_sms_availability(pool, *, enabled: bool) -> None:
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=enabled,
+        reason="test toggle", ip_address=None,
+    )
+
+
+async def test_pasting_your_own_telebirr_sms_in_chat_credits_your_wallet_no_command(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    await _set_telebirr_sms_availability(pool, enabled=True)
+    try:
+        reference = await _make_available_evidence(pool, amount="25.00")
+        telegram_id = await _register(dp, bot, session)
+
+        await dp.feed_update(bot, make_text_update(telegram_id, _transferred_sms(reference, amount="25.00")))
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "25.00" in session.sent[0].text
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        evidence_row = await pool.fetchrow(
+            "SELECT status, redeemed_by_user_id FROM payment_evidence WHERE external_reference = $1",
+            reference,
+        )
+        assert evidence_row["status"] == "redeemed"
+        assert evidence_row["redeemed_by_user_id"] == user_row["id"]
+
+        async with pool.acquire() as conn:
+            cash_account = await ledger.get_or_create_account(conn, user_row["id"], "user_cash")
+            assert await ledger.balance(conn, cash_account.id) == Decimal("25.00")
+    finally:
+        await _set_telebirr_sms_availability(pool, enabled=False)
+
+
+async def test_pasting_an_sms_with_an_unknown_reference_gets_a_clear_reply(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    await _set_telebirr_sms_availability(pool, enabled=True)
+    try:
+        telegram_id = await _register(dp, bot, session)
+        never_ingested_reference = f"DI{next_telegram_id() % 10**8:08d}"
+
+        await dp.feed_update(
+            bot, make_text_update(telegram_id, _transferred_sms(never_ingested_reference))
+        )
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "couldn't find" in session.sent[0].text.lower() or "አላገኘንም" in session.sent[0].text
+    finally:
+        await _set_telebirr_sms_availability(pool, enabled=False)
+
+
+async def test_pasting_an_sms_when_telebirr_sms_is_disabled_credits_nothing(pool, bot_ctx):
+    # telebirr_sms ships disabled by default (migration 9c1f4d7a2b3e) --
+    # explicitly left off here (no enable/restore) to exercise that real
+    # default rather than assuming it.
+    dp, bot, session = bot_ctx
+    reference = await _make_available_evidence(pool)
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, _transferred_sms(reference)))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "launching soon" in session.sent[0].text or "በቅርቡ" in session.sent[0].text
+
+    evidence_row = await pool.fetchrow(
+        "SELECT status FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert evidence_row["status"] == "available"  # untouched -- never redeemed
+
+
+async def test_an_unregistered_stranger_pasting_a_telebirr_sms_gets_the_registration_prompt(pool, bot_ctx):
+    # Mirrors test_unauthorized_sender_sms_text_is_never_ingested's own
+    # agent-SMS case, but for this handler: an SMS-shaped message is still
+    # just unrecognized text from someone who isn't a player yet, so it
+    # gets the same registration nudge as anything else would (not a bare
+    # "please register" reply, which this handler used to send here
+    # before matching on_menu_text's own existing behavior).
+    dp, bot, session = bot_ctx
+    await _set_telebirr_sms_availability(pool, enabled=True)
+    try:
+        stranger_telegram_id = next_telegram_id()
+        reference = await _make_available_evidence(pool)
+
+        await dp.feed_update(bot, make_text_update(stranger_telegram_id, _transferred_sms(reference)))
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "Share Phone Number" in session.sent[0].text or "ስልክ ቁጥር አጋራ" in session.sent[0].text
+
+        evidence_row = await pool.fetchrow(
+            "SELECT status FROM payment_evidence WHERE external_reference = $1", reference
+        )
+        assert evidence_row["status"] == "available"  # a stranger can never redeem anything
+    finally:
+        await _set_telebirr_sms_availability(pool, enabled=False)

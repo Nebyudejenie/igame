@@ -2,11 +2,21 @@
   "rooms.title": "ክፍሎች",
   "rooms.playing": "እየተጫወተ — በ~{seconds}ሰ ቀጣይ",
   "rooms.playing_now": "እየተጫወተ",
-  "rooms.derash_up_to": "ደራሽ እስከ {amount}",
+  "rooms.derash_amount": "ደራሽ {amount}",
   "rooms.empty": "ምንም ክፍል የለም",
+  "rooms.online_label": "ኦንላይን",
+  "rooms.playing_count_label": "እየተጫወቱ",
+
+  "invite.button": "ጋብዙ",
+  "invite.panel_title": "ጓደኞችን ጋብዙ፣ አብረው ይጫወቱ",
+  "invite.count": "እስካሁን {count} ጓደኞች ተቀላቅለዋል",
+  "invite.share_button": "የግብዣ አገናኝ ላክ",
+  "invite.share_text": "🎉 በአራዳ ቢንጎ ላይ ተቀላቀሉኝ — እውነተኛ ቢንጎ፣ እውነተኛ ገንዘብ፣ በቴሌግራም ላይ በቀጥታ! ለመጫወት ይንኩ፦",
+  "invite.no_link": "የግብዣ አገናኝ አሁን አይገኝም — እባክዎ ቆየት ብለው ይሞክሩ።",
+  "invite.copied": "የግብዣ አገናኝ ተቀድቷል",
 
   "lobby.pick_card": "ካርድ ይምረጡ",
-  "lobby.starts_in": "ይጀምራል {seconds}ሰ",
+  "lobby.starts_in": "{seconds}ሰ ይጀምራል",
   "lobby.round_voided_underfilled": "በቂ ተጫዋቾች ስላልተቀላቀሉ ገንዘብዎ ተመልሷል።",
   "lobby.cards_held": "{count} ካርድ ይዘዋል",
   "lobby.card_taken_change": "ካርድ {card} ተይዟል · ቀይር",
@@ -21,9 +31,9 @@
 
   "game.derash": "ደራሽ",
   "game.players": "ተጫዋቾች",
-  "game.stake": "ወስ",
+  "game.stake": "መደብ",
   "game.call": "ጥሪ",
-  "game.auto": "ራስሰር",
+  "game.auto": "AUTO",
   "game.your_card": "ካርድዎ",
   "game.your_card_no": "ካርድ #{card}",
   "game.bingo": "ቢንጎ",
@@ -35,7 +45,6 @@
 
   "spectate.banner": "የዚህ ዙር ጨዋታ ተጀምሯል። አዲስ ዙር እስኪጀመር ይጠብቁ።",
   "spectate.next_in": "ቀጣይ ዙር በ~{seconds}ሰ ይጀምራል።",
-  "spectate.reserve": "ካርድ ያዝ",
 
   "result.win_title": "ገበያ ደረሰ!",
   "result.round_winner_title": "አሸናፊ ተገኝቷል!",

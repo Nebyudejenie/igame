@@ -20,6 +20,7 @@ from typing import Any
 import asyncpg
 
 from packages.core.phone_crypto import decrypt_phone
+from services.engine.settlement import compute_derash
 
 
 async def get_or_create_user_by_telegram_id(
@@ -90,6 +91,22 @@ async def set_auto_mark_preference(pool: asyncpg.Pool, user_id: int, auto: bool)
     await pool.execute(
         "UPDATE users SET auto_mark_preference = $1 WHERE id = $2", auto, user_id
     )
+
+
+async def invite_summary(pool: asyncpg.Pool, user_id: int) -> dict[str, Any]:
+    """The same two facts services/bot/handlers.py::cmd_invite() already
+    sends over chat (the deep link's telegram_id and how many people have
+    joined through it) -- surfaced here so the Mini App can offer the same
+    invite, one tap, without a player leaving the game for the bot chat.
+    `referred_by` is an internal users.id (see 81d041ff4513_ledger_
+    foundation.py), the same column cmd_invite() counts against.
+    """
+    row = await pool.fetchrow("SELECT telegram_id FROM users WHERE id = $1", user_id)
+    telegram_id = int(row["telegram_id"]) if row is not None else 0
+    referral_count = await pool.fetchval(
+        "SELECT count(*) FROM users WHERE referred_by = $1", user_id
+    )
+    return {"telegram_id": telegram_id, "referral_count": int(referral_count)}
 
 
 async def held_card_no_for_room(pool: asyncpg.Pool, room_id: int, user_id: int) -> int | None:
@@ -175,12 +192,12 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
         """
         SELECT
             r.id, r.code, r.stake, r.max_players,
-            latest.status, latest.pot, latest.lobby_deadline,
+            latest.status, latest.pot, latest.house_cut_bps, latest.lobby_deadline,
             (SELECT count(DISTINCT user_id) FROM round_entries
              WHERE round_id = latest.id) AS distinct_players
         FROM rooms r
         LEFT JOIN LATERAL (
-            SELECT id, status, pot, lobby_deadline
+            SELECT id, status, pot, house_cut_bps, lobby_deadline
             FROM rounds
             WHERE room_id = r.id
             ORDER BY seq DESC
@@ -192,6 +209,20 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     )
     out = []
     for row in rows:
+        pot = row["pot"] if row["pot"] is not None else Decimal("0.00")
+        # Only meaningful once a round is actually running (past the lobby
+        # cutoff, per explicit request -- before that the pot is still
+        # filling and showing a derash figure at all would be premature).
+        # The Mini App only ever renders this for status == "running", but
+        # it's computed for every row the same live way build_state_sync()
+        # and round_engine.py itself do (settlement.compute_derash()), not
+        # a stale/never-written column -- see this same fix already
+        # applied there.
+        derash = (
+            compute_derash(pot, row["house_cut_bps"])[0]
+            if row["house_cut_bps"] is not None
+            else Decimal("0.00")
+        )
         out.append(
             {
                 "room_id": row["id"],
@@ -200,7 +231,8 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
                 "max_players": row["max_players"],
                 "status": row["status"] or "idle",
                 "players": row["distinct_players"] or 0,
-                "pot": str(row["pot"]) if row["pot"] is not None else "0.00",
+                "pot": str(pot),
+                "derash": str(derash),
                 # Mini App spec 2.1: the room list's own countdown ("0:18")
                 # for a room still in its lobby -- the SQL above already
                 # selected this column, but it was silently dropped here
@@ -306,7 +338,21 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         round_id = round_row["id"]
         call_index = round_row["call_index"]
         pot = round_row["pot"]
-        derash = round_row["derash"] or Decimal("0")
+        # rounds.derash is only ever written at settlement (round_engine.py's
+        # own UPDATE ... SET status = 'done', derash = $2 ...) -- for any
+        # round still in "lobby" or "running" (the only statuses reachable
+        # here; terminal rounds are treated as "no round" above), that
+        # column is always NULL, so reading it directly made this reconnect
+        # payload show a hardcoded 0.00 derash for the entire life of every
+        # round regardless of the real pot. A live player connected exactly
+        # when round_engine.py's own round_start/lobby_tick broadcasts fired
+        # saw the correct value (those compute it fresh from the live pot);
+        # anyone who reconnected, refreshed, or joined mid-round instead saw
+        # 0.00 -- the exact "sometimes right, sometimes 0" behavior this
+        # fixes by computing it the same way round_engine.py already does,
+        # live from the real pot, instead of reading the not-yet-written
+        # column.
+        derash, _ = compute_derash(pot, round_row["house_cut_bps"])
         players = round_row["distinct_players"] or 0
         stake = round_row["stake"]
         draw_order = round_row["draw_order"] or []

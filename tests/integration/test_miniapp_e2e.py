@@ -34,7 +34,10 @@ from decimal import Decimal
 import pytest
 
 from packages.core.bingo import letter_for
+from services.admin.simulated_players_queries import active_simulated_player_count
+from services.engine import settlement
 from services.engine.round_engine import RoundEngine, load_room_config
+from services.gateway import queries
 from tests.integration.conftest import (
     build_init_data,
     create_funded_user,
@@ -69,10 +72,19 @@ def telegram_stub_script(init_data: str, telegram_id: int, first_name: str) -> s
         BackButton: {{
           show: function() {{}},
           hide: function() {{}},
-          onClick: function() {{}}
-        }}
+          // Stores the app's real handler so a test can invoke it directly
+          // (window.__triggerBackButton()) to simulate a genuine press --
+          // Telegram's own native chrome has no DOM element a Playwright
+          // click() could target.
+          onClick: function(cb) {{ window.__triggerBackButton = cb; }}
+        }},
+        // Real Telegram opens its native share sheet for this; there's no
+        // such UI in a test browser, so this just records the exact URL
+        // the app asked to open, for a test to assert against.
+        openTelegramLink: function(url) {{ window.__openedTelegramLinks.push(url); }}
       }}
     }};
+    window.__openedTelegramLinks = [];
     """
 
 
@@ -450,6 +462,323 @@ async def test_a_solo_player_reaches_active_gameplay_and_a_real_result(
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_telegram_back_button_works_from_a_live_game_screen(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A real product gap: Telegram's native Back button is shown on the
+    game screen (app.v6.js's showScreen() calls tg.BackButton.show() for
+    every screen except "rooms"), but its onClick handler used to only
+    handle wallet/lobby/result -- pressing it during a live round did
+    nothing, despite the button being visibly there. showScreen() itself
+    is a pure client-side view switch (no WebSocket/drop_card call), so
+    this proves both halves: the button now actually navigates back to
+    the room list, and the real round keeps running server-side
+    completely unaffected by a player merely looking away from it.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[0].click()  # card #1
+        await page.wait_for_selector("#screen-game.active", timeout=20000)
+
+        # Simulate a genuine Telegram Back press -- there's no real DOM
+        # element for Telegram's own native chrome, so the stub above
+        # captured the app's real onClick handler for direct invocation.
+        await page.evaluate("window.__triggerBackButton()")
+        await page.wait_for_selector("#screen-rooms.active", timeout=5000)
+
+        # The round itself must be completely unaffected -- still running
+        # (or already progressed on its own), never voided/dropped just
+        # because the player navigated away from looking at it.
+        round_status = await pool.fetchval(
+            "SELECT status FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        assert round_status in ("running", "settling", "done"), round_status
+        entry_count = await pool.fetchval(
+            "SELECT count(*) FROM round_entries re JOIN rounds r ON r.id = re.round_id "
+            "WHERE r.room_id = $1 AND re.user_id = $2",
+            room_id, user_row["id"],
+        )
+        assert entry_count == 1  # card was never dropped by navigating away
+
+        assert console_errors == [], f"JS errors during back-button navigation: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_the_auto_switch_toggles_and_really_persists_both_round_and_user_level(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """The game screen's AUTO toggle (#auto-switch) -- verifying it isn't
+    just a label that flips a CSS class: a real click must actually reach
+    the server (services/gateway/connection.py's "set_auto" handler) and
+    persist in both places the spec calls for -- the current round's own
+    round_entries.auto_mark (what the engine's auto-claim logic reads
+    right now) and the player's account-level users.auto_mark_preference
+    (what their *next* round starts from). 300ms/call (matching this
+    file's other post-round_start interaction tests) gives comfortable
+    real time to click and check the database mid-round without racing
+    the round to its own natural end -- a slower interval was tried first
+    and made teardown (engine.stop() only takes effect once the current
+    round's own call loop naturally finishes, up to 75 calls away) take
+    minutes instead of seconds.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=300,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[0].click()  # card #1
+        await page.wait_for_selector("#screen-game.active", timeout=20000)
+
+        # Defaults to on -- both the static markup (class="switch on") and
+        # get_auto_mark_preference()'s own fallback for a first-time user.
+        assert "on" in (await page.get_attribute("#auto-switch", "class") or "")
+        assert await page.get_attribute("#auto-switch", "aria-checked") == "true"
+
+        round_id = await pool.fetchval(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        assert round_id is not None
+
+        async def auto_mark_in_round() -> bool:
+            value = await pool.fetchval(
+                "SELECT auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2",
+                round_id, user_row["id"],
+            )
+            return bool(value)
+
+        async def auto_mark_preference() -> bool:
+            value = await pool.fetchval(
+                "SELECT auto_mark_preference FROM users WHERE id = $1", user_row["id"]
+            )
+            return bool(value)
+
+        assert await auto_mark_in_round() is True
+        assert await auto_mark_preference() is True
+
+        # Click it off.
+        await page.click("#auto-switch")
+        await page.wait_for_function(
+            "document.getElementById('auto-switch').getAttribute('aria-checked') === 'false'",
+            timeout=5000,
+        )
+        assert "on" not in (await page.get_attribute("#auto-switch", "class") or "")
+
+        async def poll_db_false() -> None:
+            for _ in range(50):
+                if not await auto_mark_in_round() and not await auto_mark_preference():
+                    return
+                await asyncio.sleep(0.1)
+            raise AssertionError("auto_mark never reached False in the database after clicking off")
+
+        await poll_db_false()
+
+        # Click it back on -- both the UI and the database must recover.
+        await page.click("#auto-switch")
+        await page.wait_for_function(
+            "document.getElementById('auto-switch').getAttribute('aria-checked') === 'true'",
+            timeout=5000,
+        )
+        assert "on" in (await page.get_attribute("#auto-switch", "class") or "")
+
+        async def poll_db_true() -> None:
+            for _ in range(50):
+                if await auto_mark_in_round() and await auto_mark_preference():
+                    return
+                await asyncio.sleep(0.1)
+            raise AssertionError("auto_mark never reached True in the database after clicking on")
+
+        await poll_db_true()
+
+        assert console_errors == [], f"JS errors toggling AUTO: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=30)
+
+
+async def test_switching_rooms_does_not_leak_a_stray_rooms_call_broadcast(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Real reported bug: joinRoom() subscribes this WebSocket connection
+    to a room's live "call" broadcasts (services/gateway/connection.py's
+    _joined_rooms / FanoutHub.subscribe_room()), but nothing ever called
+    leaveRoom() when navigating away from a room -- a player who looked
+    into several different rooms in one session (verbatim report: "I
+    create 6 rooms and when I enter to each room... room number 6 is
+    working crazy, the number of out is 8 but it is over 20 numbers")
+    stayed subscribed to every one of them at once, so a fast, unwatched
+    room's own independent call sequence kept bleeding into whatever room
+    the player was actually looking at.
+
+    Room A ticks unattended, fast, with nobody ever watching it, so by
+    the time the player switches away to Room B its own real call_index
+    is already far higher than anything Room B could show this early --
+    if Room A's calls were still leaking in after leaving it, Room B's
+    own displayed count would be contaminated with that much higher
+    number instead of matching Room B's own real, still-low progress.
+    """
+    room_a = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=1, call_interval_ms=150,
+        is_active=True,
+    )
+    room_b = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=300,
+        is_active=True,
+    )
+    # None until actually created inside the try below -- if anything here
+    # raises before both tasks exist, the finally block below has nothing
+    # it needs to await/stop, instead of a NameError masking the real
+    # failure or (worse) a half-created engine leaking as a detached task.
+    task_a = None
+    task_b = None
+    try:
+        room_a_config, room_b_config = await asyncio.gather(
+            load_room_config(pool, room_a), load_room_config(pool, room_b)
+        )
+        engine_a = RoundEngine(pool, redis, room_a_config, card_pool)
+        engine_b = RoundEngine(pool, redis, room_b_config, card_pool)
+        task_a = asyncio.create_task(engine_a.run_forever())
+        task_b = asyncio.create_task(engine_b.run_forever())
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        room_a_selector = f'.room-card[data-room-id="{room_a}"]'
+        room_b_selector = f'.room-card[data-room-id="{room_b}"]'
+
+        # Room A is already running and calling on its own, unattended --
+        # real time to rack up a real, high call_index before the player
+        # ever looks at it (75 calls at 150ms/call = 11.25s to exhaust, so
+        # this stays well inside its first, still-running round).
+        await asyncio.sleep(3.5)
+
+        await page.wait_for_selector(room_a_selector, timeout=10000)
+        await page.click(room_a_selector)
+        await page.wait_for_selector("#screen-game.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=10000
+        )
+
+        room_a_call_index = await pool.fetchval(
+            "SELECT call_index FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_a
+        )
+        assert room_a_call_index > 15, (
+            f"test setup assumption failed: room A should already be well into its own "
+            f"call sequence by now, got {room_a_call_index}"
+        )
+
+        # Back to the room list -- the real Telegram Back press, the exact
+        # navigation that used to leave room A's subscription alive
+        # forever (see test_telegram_back_button_works_from_a_live_game_
+        # screen for this same real-handler-invocation technique).
+        await page.evaluate("window.__triggerBackButton()")
+        await page.wait_for_selector("#screen-rooms.active", timeout=5000)
+
+        await page.wait_for_selector(room_b_selector, timeout=10000)
+        await page.click(room_b_selector)
+        await page.wait_for_selector("#screen-game.active", timeout=15000)
+        await page.wait_for_function(
+            "document.getElementById('stat-call').textContent !== '0/75'", timeout=15000
+        )
+
+        displayed_call_text = await page.text_content("#stat-call")
+        displayed_call_index = int((displayed_call_text or "0/75").split("/")[0])
+        room_b_real_call_index = await pool.fetchval(
+            "SELECT call_index FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_b
+        )
+        # A tolerant, not exact, comparison -- the DOM read and the DB read
+        # happen a moment apart, so being one real call ahead or behind is
+        # expected and fine. The bug this guards against would show a
+        # number close to (or past) room A's own by-then-even-higher
+        # call_index, nowhere close to room B's own real, still-early one.
+        assert abs(displayed_call_index - room_b_real_call_index) <= 2, (
+            f"displayed {displayed_call_index}, but room B's real call_index is "
+            f"{room_b_real_call_index} -- likely contaminated by room A's own calls"
+        )
+        assert displayed_call_index < room_a_call_index, (
+            f"displayed {displayed_call_index} for room B is not below room A's own "
+            f"{room_a_call_index} -- looks exactly like the reported cross-room leak"
+        )
+
+        assert console_errors == [], f"JS errors switching rooms: {console_errors}"
+        await page.close()
+    finally:
+        # 30s, not this file's usual 15s: engine.stop() only takes effect
+        # once each engine's *current* round naturally finishes (up to 75
+        # calls away) -- see test_the_auto_switch_toggles_and_really_
+        # persists_both_round_and_user_level's own comment on this same
+        # asyncio.wait_for above for the full explanation. Both engines
+        # tick independently, so stopping and awaiting them concurrently
+        # (rather than one full 30s wait_for after another) keeps this
+        # teardown's worst case ~30s instead of ~60s -- and task_a/task_b
+        # are only ever None if construction itself failed above, in which
+        # case there's nothing here to stop.
+        if task_a is not None and task_b is not None:
+            await asyncio.gather(engine_a.stop(), engine_b.stop())
+            await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=30)
+
+
 async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
     gateway_server, browser, pool, redis, card_pool, conn
 ):
@@ -519,6 +848,290 @@ async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Per explicit request: the rooms (stake-picker) screen shows how
+    alive the platform is the moment it opens. "Online" must be a real
+    count of open WebSocket connections (services/gateway/connection.py's
+    online_count on the "rooms" push), not a guess -- proven here by
+    connecting a genuine second real browser tab and confirming the
+    figure the *second* connection sees actually includes the first.
+    "Playing" is the sum of every room's own player count, confirmed
+    against a real card a first player actually took.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=30, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    # Delta, not an absolute total: this shared dev database accumulates
+    # real is_active=true rooms across every test run (the same
+    # "3092 leftover test rooms" class of pollution this session already
+    # hit elsewhere), so "Playing" sums real activity across every one of
+    # them, not just this test's own room. "Online" now also folds in
+    # active_simulated_player_count() (idle/joining/playing bots read as
+    # "online" too, same as a real connected-but-not-yet-playing player
+    # would) -- baselined the same way, since the shared dev DB can have
+    # real active bots at test time.
+    baseline_playing = sum(r["players"] for r in await queries.list_rooms(pool))
+    baseline_online = await active_simulated_player_count(pool)
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, console_errors_a = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_function(
+            f"document.getElementById('rooms-online-count').textContent === '{baseline_online + 1}'",
+            timeout=10000,
+        )
+
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()  # card #1
+        await page_a.wait_for_selector("#lobby-your-cards-section:not(.hidden)", timeout=10000)
+
+        # Player B connects fresh, after A is both online AND holding a
+        # real card -- B's own very first "rooms" push must reflect both.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.wait_for_function(
+            f"document.getElementById('rooms-online-count').textContent === '{baseline_online + 2}'",
+            timeout=10000,
+        )
+        playing_text = await page_b.text_content("#rooms-playing-count")
+        assert playing_text == str(baseline_playing + 1), (
+            f"expected baseline ({baseline_playing}) + A's own real card = {baseline_playing + 1}, "
+            f"got {playing_text!r}"
+        )
+
+        assert console_errors_a == [], f"JS errors for player A: {console_errors_a}"
+        assert console_errors_b == [], f"JS errors for player B: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_room_list_derash_only_shows_once_running_and_is_the_real_derash_not_the_pot(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Per explicit request: the stake-selection (Rooms) screen must not
+    show a derash figure at all until a room's round has actually passed
+    its lobby cutoff and started running (the pot is still filling up
+    until then, so advertising a number would be premature) -- and once
+    shown, it must be the real, post-house-cut derash (services/gateway/
+    queries.py::list_rooms(), via settlement.compute_derash()), not the
+    raw gross pot the "Derash up to X" copy used to display.
+    """
+    # A generous lobby, unlike this file's other fast-timing tests: the
+    # "before cutoff" assertion below needs a real, comfortable window to
+    # land inside a real second browser connection's own full boot
+    # sequence (page load, WS handshake, funding, reload) before the round
+    # transitions to running -- a short lobby made this flaky (the round
+    # was already running by the time player B's own check ran).
+    house_cut_bps = 2000
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), house_cut_bps=house_cut_bps, min_players=1,
+        lobby_seconds=20, call_interval_ms=300, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    room_selector = f'.room-card[data-room-id="{room_id}"]'
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, console_errors_a = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()  # stakes into the round -- pot is now 10.00, status "lobby"
+
+        # A second, fresh connection's very first "rooms" push must still
+        # hide the derash line for this room: the lobby hasn't closed yet.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.wait_for_selector(room_selector, timeout=10000)
+        derash_text_before = await page_b.text_content(f'{room_selector} .derash-line')
+        assert (derash_text_before or "").strip() == "", (
+            f"expected no derash shown before the lobby closes, got {derash_text_before!r}"
+        )
+
+        # Player A's own client naturally moves to the game screen the
+        # instant round_start actually broadcasts -- the real signal the
+        # lobby has closed and the round is running, no arbitrary sleep.
+        await page_a.wait_for_selector("#screen-game.active", timeout=30000)
+
+        # Player B reloads (re-running boot()'s own refreshRoomList()) --
+        # same real "rooms" push, now for a room whose round is running.
+        await page_b.reload()
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.wait_for_selector(room_selector, timeout=10000)
+        await page_b.wait_for_function(
+            f"document.querySelector('{room_selector} .derash-line').textContent.trim() !== ''",
+            timeout=10000,
+        )
+        derash_text_after = await page_b.text_content(f'{room_selector} .derash-line')
+        expected_derash, _ = settlement.compute_derash(Decimal("10.00"), house_cut_bps)
+        assert str(expected_derash) in (derash_text_after or ""), (
+            f"expected the real derash ({expected_derash}) in {derash_text_after!r}"
+        )
+        # The old "up to" pot-based copy must be gone -- this is the real,
+        # final derash for a locked-in pot, not an upper bound.
+        assert "10.00" not in (derash_text_after or ""), (
+            f"expected the derash figure, not the raw pot, got {derash_text_after!r}"
+        )
+
+        assert console_errors_a == [], f"JS errors for player A: {console_errors_a}"
+        assert console_errors_b == [], f"JS errors for player B: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        # 30s, not this file's usual 15s: engine.stop() only sets a flag
+        # _run_running()'s own per-call loop never actually checks (only
+        # self._status/self._lock.is_held() do) -- it's honored at the
+        # *outer* run_forever() loop boundary, i.e. only once the current
+        # round naturally finishes. With a single real card and this room's
+        # default win_patterns (min_winning_lines=2), that can run the
+        # full 75-call sequence at 300ms/call (~22.5s) before a win lands,
+        # confirmed directly: this teardown took ~38s wall-clock in
+        # isolation, comfortably failing the file's usual 15s budget.
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=30)
+
+
+async def test_spectate_shows_the_admin_configured_announcement_marquee(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """The spectate screen's old "Reserve a card" button was replaced
+    entirely -- it re-synced the whole view for zero real benefit
+    (join() can't assign a card mid-round; the player auto-advances into
+    the next round regardless), which looked exactly like an already
+    -shown called number flickering away and back. In its place: a
+    genuinely useful, admin-configurable scrolling announcement
+    (services/admin/announcement_queries.py), fetched once at boot via
+    /api/announcement and rendered here.
+
+    Proven against a real running round: with a real announcement set
+    and enabled, a spectating player's marquee actually contains that
+    exact text, the old button element is gone entirely, and -- the
+    original report's own concern -- the called-number board is
+    completely unaffected by anything on this screen.
+    """
+    from services.admin import announcement_queries
+    from tests.integration.test_admin_auth import create_test_admin
+
+    admin_id, *_ = await create_test_admin(pool)
+    announcement_text = "Deposit bonus this week — ask support for details!"
+    await announcement_queries.update_announcement_admin(
+        pool, admin_id=admin_id, text=announcement_text, enabled=True,
+        reason="e2e test", ip_address=None,
+    )
+
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=3, call_interval_ms=300,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, _ = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()
+        await page_a.wait_for_selector("#screen-game.active", timeout=20000)
+
+        # Player B connects fresh while the round is already running and
+        # holds no card -- the real, natural way to reach spectate mode.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.click(room_selector)
+        await page_b.wait_for_selector("#screen-game.active", timeout=10000)
+        await page_b.wait_for_selector("#spectate-banner:not(.hidden)", timeout=10000)
+        await page_b.wait_for_selector("#announcement-marquee:not(.hidden)", timeout=10000)
+
+        marquee_text = await page_b.text_content("#announcement-marquee-text")
+        assert marquee_text == announcement_text, f"unexpected marquee text: {marquee_text!r}"
+
+        # The old button is gone entirely, not just hidden.
+        old_button = await page_b.query_selector("#reserve-card-btn")
+        assert old_button is None, "the old Reserve button must no longer exist in the DOM"
+
+        # At least one real call must land before this proves the board
+        # is genuinely unaffected by anything on this screen.
+        await page_b.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=15000
+        )
+        called_after_marquee_shown = await page_b.eval_on_selector_all(
+            ".board-cell.called", "els => els.length"
+        )
+        assert called_after_marquee_shown > 0
+
+        assert console_errors_b == [], f"JS errors while spectating: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        await engine.stop()
+        # Longer than this file's usual 15s: this test's own setup work
+        # (funding a user, a page reload, a second real browser
+        # connection) takes several real seconds, during which
+        # run_forever()'s own continuous lifecycle loop can complete and
+        # restart multiple real rounds back to back at this room's fast
+        # call_interval_ms -- stop() genuinely needs longer to reach a
+        # safe checkpoint than a test with only one round ever plays out.
+        await asyncio.wait_for(task, timeout=45)
+        # platform_announcement is a real, shared singleton row -- leaving
+        # it enabled would show this test's own placeholder text to every
+        # other test (and any manual QA) against this database afterward.
+        await pool.execute("UPDATE platform_announcement SET text = '', enabled = false WHERE id = 1")
 
 
 async def _wait_for_class(locator, class_name: str, interval: float = 0.05) -> None:
@@ -1124,6 +1737,15 @@ async def test_disabling_voice_makes_zero_audio_requests(gateway_server, browser
         # the reload above -- otherwise this test would prove nothing
         # about the setting actually being off during gameplay.
         assert await page.evaluate("localStorage.getItem('jobingo_voice_enabled')") == "false"
+        # Cleared here, not tracked from page load: voiceCaller.preloadAll()
+        # deliberately warms all 75 clips on a brand-new session's very
+        # first boot (voice defaults on until a player says otherwise),
+        # which legitimately requested every clip before this test ever
+        # touched the toggle above. What this test actually needs to prove
+        # is that *disabled* voice makes zero requests during real
+        # gameplay from here on -- not that literally nothing was ever
+        # fetched before the player expressed a preference.
+        audio_requests.clear()
 
         room_selector = f'.room-card[data-room-id="{room_id}"]'
         await page.wait_for_selector(room_selector, timeout=10000)
@@ -1391,4 +2013,43 @@ async def test_opening_directly_in_a_plain_browser_shows_an_accurate_message_not
     assert console_errors == [], f"JS errors on the no-initData boot path: {console_errors}"
 
     await page.screenshot(path="/tmp/miniapp-not-in-telegram.png")
+    await page.close()
+
+
+async def test_rooms_screen_invite_button_shares_a_real_referral_link(gateway_server, browser, conn):
+    """The Rooms header's new Invite button (services/gateway/queries.py::
+    invite_summary(), services/gateway/app.py's /api/invite) -- the same
+    ?start=ref_{telegram_id} deep link and join count
+    services/bot/handlers.py::cmd_invite() already sends over chat, now one
+    tap away in the game itself instead of requiring a trip back to the bot.
+    """
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+    referrer_id = await conn.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert referrer_id is not None
+    for _ in range(2):
+        await conn.execute(
+            "INSERT INTO users (telegram_id, display_name, referred_by) VALUES ($1, $2, $3)",
+            next_telegram_id(), "referred-friend", referrer_id,
+        )
+
+    await page.click("#invite-btn")
+    await page.wait_for_selector("#invite-panel:not(.hidden)", timeout=5000)
+    await page.wait_for_function(
+        "document.getElementById('invite-count').textContent.includes('2')", timeout=10000
+    )
+
+    await page.click("#invite-share-btn")
+    opened = await page.evaluate("window.__openedTelegramLinks")
+    assert len(opened) == 1, f"expected exactly one share-sheet open, got {opened!r}"
+    assert opened[0].startswith("https://t.me/share/url?")
+    assert f"ref_{telegram_id}" in opened[0]
+    assert "aradabingo_test_bot" in opened[0]
+
+    assert console_errors == [], f"JS errors during invite flow: {console_errors}"
     await page.close()

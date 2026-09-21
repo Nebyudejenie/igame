@@ -115,7 +115,14 @@ async def test_create_simulated_player_funds_via_house_float_adjustment(pool, bo
     assert sp_row["strategy"] == "normal"
 
 
-async def test_roster_cap_rejects_an_eleventh_bot(pool, bot_factory):
+async def test_roster_cap_rejects_an_eleventh_bot(pool, bot_factory, monkeypatch):
+    # Patched down to a small cap for this test only -- MAX_SIMULATED_PLAYERS
+    # is 200 in production, and this test only needs to prove the real
+    # enforcement code path (create_simulated_player reads the module-level
+    # constant at call time, so patching it here exercises the exact same
+    # branch), not actually create 200 real bots with 200 real ledger
+    # transactions just to reach it.
+    monkeypatch.setattr(spq, "MAX_SIMULATED_PLAYERS", 3)
     admin_id, *_ = await create_test_admin(pool)
     existing = await pool.fetchval("SELECT count(*) FROM simulated_players")
     headroom = spq.MAX_SIMULATED_PLAYERS - existing
@@ -206,6 +213,67 @@ async def test_stop_all_disables_every_active_bot_and_flips_global_enabled_false
         # Restore the shipped-default global switch regardless of outcome,
         # so this test can never leave enabled=true behind for whatever
         # test/manual QA runs against this shared database next.
+        await spq.update_settings_admin(
+            pool, admin_id=admin_id, enabled=False, max_concurrent_bots=10, reason="test cleanup", ip_address=None
+        )
+
+
+async def test_active_simulated_player_count_reflects_idle_and_playing_but_not_disabled_or_paused(
+    pool, bot_factory
+):
+    # Real user request: an idle bot (not currently seated in any round)
+    # was invisible everywhere -- it has no WebSocket of its own to count
+    # toward the Rooms screen's "online" headcount (services/gateway/
+    # connection.py), and it only ever shows up in "playing" once actually
+    # in round_entries. This is the query behind the fix: an idle bot
+    # should read as "online" the same way a real, connected-but-not-yet-
+    # playing player already does.
+    admin_id, *_ = await create_test_admin(pool)
+
+    await spq.update_settings_admin(
+        pool, admin_id=admin_id, enabled=True, max_concurrent_bots=10, reason="test enable", ip_address=None
+    )
+    try:
+        # Baselined *after* enabling, not before: this shared dev database
+        # can have other real active bots at test time, and the count is
+        # forced to 0 whenever the global switch is off (checked below),
+        # so a baseline taken before enabling could read 0 even with other
+        # active bots on file -- comparing against that would overcount
+        # every delta below by however many of those there are.
+        baseline = await spq.active_simulated_player_count(pool)
+
+        user_id = await bot_factory(admin_id)
+        # Freshly created: status = "disabled" -- must not count yet.
+        assert await spq.active_simulated_player_count(pool) == baseline
+
+        await spq.start_simulated_player_admin(
+            pool, admin_id=admin_id, user_id=user_id, reason="test", ip_address=None
+        )
+        assert await spq.active_simulated_player_count(pool) == baseline + 1  # idle counts
+
+        await spq.pause_simulated_player_admin(
+            pool, admin_id=admin_id, user_id=user_id, reason="test", ip_address=None
+        )
+        assert await spq.active_simulated_player_count(pool) == baseline  # paused doesn't
+
+        await spq.start_simulated_player_admin(
+            pool, admin_id=admin_id, user_id=user_id, reason="test", ip_address=None
+        )
+        await pool.execute(
+            "UPDATE simulated_players SET status = 'playing' WHERE user_id = $1", user_id
+        )
+        assert await spq.active_simulated_player_count(pool) == baseline + 1  # playing counts too
+
+        # The global switch is belt-and-suspenders: even with a real
+        # "playing" row on file, the whole feature reading as off must
+        # force this back to whatever real WebSocket connections alone
+        # would show.
+        await spq.update_settings_admin(
+            pool, admin_id=admin_id, enabled=False, max_concurrent_bots=10,
+            reason="test: verify global gate", ip_address=None,
+        )
+        assert await spq.active_simulated_player_count(pool) == 0
+    finally:
         await spq.update_settings_admin(
             pool, admin_id=admin_id, enabled=False, max_concurrent_bots=10, reason="test cleanup", ip_address=None
         )

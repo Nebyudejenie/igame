@@ -3,6 +3,20 @@ name: jobingo
 services:
   postgres:
     image: postgres:15
+    # Explicit, host-wide-unique name -- see DECISIONS.md's 2026-09-02
+    # entry: on the real production host this stack was found running on,
+    # gateway/payments/admin are dual-homed onto a second, shared Docker
+    # network (Traefik ingress for other apps on the same box), which also
+    # has its own container aliased plainly "postgres". Docker's embedded
+    # DNS resolved the bare service name ambiguously across both networks
+    # and silently pointed jobingo's own services at the wrong database
+    # for ~19.5 hours. A `container_name` is unique across the whole
+    # Docker host (Docker enforces this at creation time), so every other
+    # service's DATABASE_URL points at `jobingo-postgres` specifically,
+    # never the bare `postgres` service name -- this can't regress back
+    # into the same ambiguity even if this stack ever gets a network
+    # neighbor again.
+    container_name: jobingo-postgres
     environment:
       POSTGRES_USER: jobingo
       POSTGRES_PASSWORD: jobingo
@@ -53,6 +67,11 @@ services:
 
   redis:
     image: redis:7
+    # Same reasoning as postgres's own container_name above -- a unique,
+    # host-wide name that every other service's REDIS_URL points at
+    # directly (`jobingo-redis`), immune to the same cross-network bare-
+    # name ambiguity.
+    container_name: jobingo-redis
     ports:
       # Host 6380, not 6379 -- same reason as Postgres above.
       - "6380:6379"

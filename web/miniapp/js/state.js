@@ -8,6 +8,7 @@ const state = {
   serverTimeOffsetMs: 0, // server_time - Date.now(), refreshed on every message that carries one
   screen: "rooms", // rooms | lobby | game | result | wallet
   rooms: [],
+  onlineCount: 0, // real WebSocket headcount from the server's own "rooms" push, never bots
   currentRoomId: null,
   round: null, // last state_sync payload for the joined room
   yourCardGrid: null, // 5x5 grid for the card this user holds, once known

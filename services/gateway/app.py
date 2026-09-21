@@ -87,6 +87,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         app.state.redis,
         app.state.hub,
         app.state.bot_token,
+        app.state.connections,
     )
     app.state.connections.add(handler)
     try:
@@ -158,6 +159,38 @@ async def api_manual_payment_destinations(
 async def api_payment_methods(authorization: str = Header(default="")) -> dict[str, list[str]]:
     await _authenticated_user_id(authorization)
     return await availability.get_payment_availability(app.state.pool, get_settings())
+
+
+@app.get("/api/announcement")
+async def api_announcement(authorization: str = Header(default="")) -> dict[str, Any]:
+    """The admin-configurable scrolling banner (services/admin/
+    announcement_queries.py) -- fetched once at boot, same as the other
+    /api/* config reads above. disabled/empty is a completely normal,
+    common response; the Mini App just shows nothing in that case.
+    """
+    await _authenticated_user_id(authorization)
+    row = await app.state.pool.fetchrow("SELECT text, enabled FROM platform_announcement WHERE id = 1")
+    if row is None or not row["enabled"] or not row["text"]:
+        return {"text": None}
+    return {"text": row["text"]}
+
+
+@app.get("/api/invite")
+async def api_invite(authorization: str = Header(default="")) -> dict[str, Any]:
+    """Same `?start=ref_{telegram_id}` deep link and referral count
+    services/bot/handlers.py::cmd_invite() already sends over chat --
+    surfaced in-app so a player can share it with one tap (native
+    Telegram share sheet, see js/app.v6.js) without leaving the game.
+    `link: None` only when the bot has no configured username, matching
+    cmd_invite()'s own invite.no_username fallback.
+    """
+    user_id = await _authenticated_user_id(authorization)
+    summary = await queries.invite_summary(app.state.pool, user_id)
+    settings = get_settings()
+    if not settings.telegram_bot_username:
+        return {"link": None, "referral_count": summary["referral_count"]}
+    link = f"https://t.me/{settings.telegram_bot_username}?start=ref_{summary['telegram_id']}"
+    return {"link": link, "referral_count": summary["referral_count"]}
 
 
 # Every DepositRejected/WithdrawalRejected subclass maps to a short error

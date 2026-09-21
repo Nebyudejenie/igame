@@ -1,4 +1,4 @@
-"""Simulated Players: up to 10 admin-controlled bot accounts that join
+"""Simulated Players: up to MAX_SIMULATED_PLAYERS admin-controlled bot accounts that join
 real rooms and play through the real game engine (services/engine/
 round_engine.py, via services/engine/commands.py -- the same channel a
 real player's WebSocket action travels) so a room doesn't feel empty
@@ -37,7 +37,7 @@ from packages.core import ledger
 from services.admin import audit
 
 INITIAL_SIMULATED_BALANCE = Decimal("5000.00")
-MAX_SIMULATED_PLAYERS = 10
+MAX_SIMULATED_PLAYERS = 200
 
 STATUSES = ("disabled", "idle", "joining", "playing", "paused")
 STRATEGIES = ("conservative", "normal", "active", "randomized")
@@ -115,6 +115,29 @@ async def _fund_simulated_player_in_transaction(
         ip_address=ip_address,
     )
     return {"before": str(before), "after": str(after)}
+
+
+async def active_simulated_player_count(pool: asyncpg.Pool) -> int:
+    """How many bots should currently read as "present" on the platform --
+    the same signal a real player's own open WebSocket gives the Rooms
+    screen's "online" headcount (services/gateway/connection.py), which a
+    bot has no other way to contribute to (this module's own docstring:
+    bots act via services.engine.commands.send_command(), never a
+    WebSocket of their own). 'idle'/'joining'/'playing' all count -- an
+    idle bot between rounds is still meant to look like a real user
+    browsing rooms, exactly like a real player who's connected but not in
+    a round yet; 'disabled'/'paused' don't, since an admin explicitly
+    stopped those. Gated on the global settings.enabled switch too, belt
+    and suspenders: if the whole feature is off, nothing here should
+    count regardless of whatever an individual row's status still says.
+    """
+    enabled = await pool.fetchval("SELECT enabled FROM simulated_players_settings WHERE id = 1")
+    if not enabled:
+        return 0
+    count = await pool.fetchval(
+        "SELECT count(*) FROM simulated_players WHERE status IN ('idle', 'joining', 'playing')"
+    )
+    return int(count)
 
 
 async def list_simulated_players(pool: asyncpg.Pool) -> list[dict[str, Any]]:

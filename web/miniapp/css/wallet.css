@@ -364,7 +364,25 @@
   border-radius: var(--radius);
   background: var(--surface); /* plain fallback for WebViews without color-mix() support */
   background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  color: var(--text);
   margin-bottom: 14px;
+}
+
+/* Real reported bug: unlike .destination-card above, this variant never
+   set an explicit color on its own icon/name/ref text at all -- they
+   silently inherited whatever color happened to cascade down to this
+   point, which is exactly the kind of implicit dependency that broke in
+   a real Telegram client (applyWalletTheme()'s own contrast fix in
+   app.v6.js addresses the *cause*; this is the belt-and-suspenders fix
+   so this specific card never again depends on inheritance alone for
+   text that must stay readable against its own background). */
+.destination-display .destination-icon,
+.destination-display .destination-name {
+  color: var(--text);
+}
+
+.destination-display .destination-ref {
+  color: var(--muted);
 }
 
 .destination-display .destination-copy-btn {

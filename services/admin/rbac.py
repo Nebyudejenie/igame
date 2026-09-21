@@ -172,6 +172,15 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "keno:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "keno:manage": frozenset({"ops", "superadmin"}),
     "keno:configure": frozenset({"superadmin"}),
+
+    # Platform announcement: a single scrolling banner every real player
+    # sees in the Mini App. Same view/manage split and breadth as
+    # simulated_players above: read-only visibility is low-sensitivity,
+    # but writing it is public-facing copy every real player immediately
+    # sees, so it's ops-gated rather than support-reachable (matches
+    # bot_content:manage's own {ops, superadmin} for the same reason).
+    "announcement:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    "announcement:manage": frozenset({"ops", "superadmin"}),
 }
 
 

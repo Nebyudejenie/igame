@@ -40,7 +40,3 @@ node_modules/
 /deploy/cloudflared/config.yml
 /deploy/cloudflared/tunnel-credentials.json
 
-# Real Bingo-call audio clips are a deploy-time asset drop, not a commit --
-# web/miniapp/audio/calls/README.md + MANIFEST.json are the contract they
-# need to follow.
-web/miniapp/audio/calls/*.mp3

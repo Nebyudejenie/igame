@@ -69,10 +69,29 @@ RedemptionCode = Literal[
     "UNKNOWN_USER",
 ]
 
+# Named the same way services/payments/telebirr_ingest.py's own
+# STATUS_*/SOURCE_* constants are (NAME: LiteralAlias = "value") -- so a
+# caller outside this module (services/bot/handlers.py's own chat-paste
+# redemption path) can branch on outcome.code by imported name rather
+# than repeating these strings as bare literals of its own.
+CODE_PAYMENT_REDEEMED: RedemptionCode = "PAYMENT_REDEEMED"
+CODE_INVALID_REFERENCE: RedemptionCode = "INVALID_REFERENCE"
+CODE_PAYMENT_NOT_FOUND: RedemptionCode = "PAYMENT_NOT_FOUND"
+CODE_PAYMENT_ALREADY_REDEEMED: RedemptionCode = "PAYMENT_ALREADY_REDEEMED"
+CODE_PAYMENT_BLOCKED: RedemptionCode = "PAYMENT_BLOCKED"
+CODE_PAYMENT_DISPUTED: RedemptionCode = "PAYMENT_DISPUTED"
+CODE_PAYMENT_EXPIRED: RedemptionCode = "PAYMENT_EXPIRED"
+CODE_RATE_LIMITED: RedemptionCode = "RATE_LIMITED"
+CODE_DAILY_CAP_EXCEEDED: RedemptionCode = "DAILY_CAP_EXCEEDED"
+CODE_SELF_EXCLUDED: RedemptionCode = "SELF_EXCLUDED"
+CODE_ACCOUNT_BANNED: RedemptionCode = "ACCOUNT_BANNED"
+CODE_COOLING_OFF_ACTIVE: RedemptionCode = "COOLING_OFF_ACTIVE"
+CODE_UNKNOWN_USER: RedemptionCode = "UNKNOWN_USER"
+
 _STATUS_TO_CODE: dict[str, RedemptionCode] = {
-    "blocked": "PAYMENT_BLOCKED",
-    "disputed": "PAYMENT_DISPUTED",
-    "expired": "PAYMENT_EXPIRED",
+    "blocked": CODE_PAYMENT_BLOCKED,
+    "disputed": CODE_PAYMENT_DISPUTED,
+    "expired": CODE_PAYMENT_EXPIRED,
 }
 
 

@@ -23,6 +23,7 @@ import * as adminUsersScreen from "./screens/admin_users.js";
 import * as bonusesScreen from "./screens/bonuses.js";
 import * as telegramHealthScreen from "./screens/telegram_health.js";
 import * as simulatedPlayersScreen from "./screens/simulated_players.js";
+import * as announcementScreen from "./screens/announcement.js";
 
 // Order here is the nav order. Each screen owns its own error handling
 // (an inline banner using the real API error detail, e.g. "role 'support'
@@ -46,6 +47,7 @@ const SCREENS = {
   bot_content: botContentScreen,
   telegram_health: telegramHealthScreen,
   simulated_players: simulatedPlayersScreen,
+  announcement: announcementScreen,
   reports: reportsScreen,
   risk: riskScreen,
   audit: auditScreen,
@@ -95,6 +97,10 @@ function buildNav(active) {
 }
 
 async function showScreen(name) {
+  // Reflected in the URL (not pushed as a new history entry -- nav clicks
+  // shouldn't pile up back-button stops) purely so a refresh lands back on
+  // the same section instead of always resetting to the dashboard.
+  history.replaceState(null, "", `#${name}`);
   buildNav(name);
   contentEl.innerHTML = `<p class="loading">Loading…</p>`;
   try {
@@ -131,10 +137,15 @@ async function doLogout() {
   showLogin();
 }
 
+function screenFromUrl() {
+  const name = location.hash.slice(1);
+  return name in SCREENS ? name : "dashboard";
+}
+
 function showApp() {
   loginEl.hidden = true;
   shellEl.hidden = false;
-  showScreen("dashboard");
+  showScreen(screenFromUrl());
 }
 
 function showLogin() {

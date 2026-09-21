@@ -92,6 +92,46 @@ async def test_full_round_35_players_ledger_balances(pool, redis, card_pool, con
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_state_sync_derash_reflects_the_live_pot_before_settlement(pool, redis, card_pool, conn):
+    # Real bug reported against the game screen's own derash stat:
+    # "sometimes 0, sometimes the right value". Root cause: rounds.derash
+    # is only ever written at settlement (this file's own test above
+    # confirms round_row["derash"] is correct only once status == "done"),
+    # so services/gateway/queries.py::build_state_sync() used to read that
+    # same column directly for a round still in "lobby"/"running" and
+    # always got NULL -> a hardcoded "0.00", even though the real pot was
+    # already nonzero. A player live for round_engine.py's own round_start/
+    # lobby_tick broadcasts (which compute derash fresh from the pot) saw
+    # the correct number; anyone who reconnected, refreshed, or joined
+    # mid-round instead got build_state_sync's stale zero -- exactly the
+    # intermittent symptom reported. Fixed by computing derash the same
+    # live way round_engine.py itself does, not by reading the column.
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), house_cut_bps=1000, min_players=5, lobby_seconds=20,
+    )
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        for i, user_id in enumerate((user_a, user_b)):
+            result = await engine.join(user_id, card_no=i + 1)
+            assert result.ok, result.reason
+
+        # Still in "lobby" (min_players=5, only 2 joined) -- the exact
+        # in-progress, not-yet-settled state build_state_sync() must get
+        # right, since rounds.derash is NULL for the entire life of a round.
+        sync = await gateway_queries.build_state_sync(pool, room_id, user_a)
+        assert sync["status"] == "lobby"
+        assert sync["pot"] == "40.00"
+        expected_derash, _ = settlement.compute_derash(Decimal("40.00"), 1000)
+        assert sync["derash"] == str(expected_derash)
+        assert sync["derash"] != "0.00"
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_pool, conn):
     room_id = await create_room(
         conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2, call_interval_ms=15

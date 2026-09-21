@@ -5,7 +5,7 @@ export const label = "Simulated Players";
 
 const STRATEGIES = ["conservative", "normal", "active", "randomized"];
 const SCHEDULE_MODES = ["always_on", "scheduled_window", "room_specific"];
-const MAX_SIMULATED_PLAYERS = 10;
+const MAX_SIMULATED_PLAYERS = 200;
 
 // Per-status action buttons -- same ACTIONS-by-status map shape this
 // codebase's own SMS control plane (nodes.js) already uses. "reset" is

@@ -34,6 +34,14 @@
   "deposit.provider_error": "ገቢዎን አሁን መጀመር አልተቻለም። እባክዎ ትንሽ ቆይተው ይሞክሩ።",
   "deposit.checkout_ready": "የ{amount} ብር ገቢዎን ለማጠናቀቅ ከታች ያለውን ይጫኑ።",
   "deposit.checkout_button": "💳 {amount} ብር ይክፈሉ",
+  "deposit.telebirr_redeemed": "✅ ገቢዎ ተቀብለናል! {amount} ብር ወደ ቀሪ ሂሳብዎ ታክሏል።",
+  "deposit.telebirr_invalid_reference": "ከዚህ መልእክት የግብይት ማጣቀሻ ማንበብ አልተቻለም።",
+  "deposit.telebirr_payment_not_found": "በዚህ ማጣቀሻ ምንም ክፍያ ገና አላገኘንም። ለመድረስ ትንሽ ጊዜ ሊወስድ ይችላል — እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ፣ ወይም መልእክቱን ደግመው ያረጋግጡ።",
+  "deposit.telebirr_already_redeemed": "ይህ ማጣቀሻ አስቀድሞ ጥቅም ላይ ውሏል።",
+  "deposit.telebirr_blocked": "ይህ ማጣቀሻ አሁን ሊመነዘር አይችልም። እባክዎ ድጋፍን ያግኙ።",
+  "deposit.telebirr_disputed": "ይህ ማጣቀሻ በግምገማ ላይ ነው። እባክዎ ድጋፍን ያግኙ።",
+  "deposit.telebirr_expired": "ይህ ማጣቀሻ ጊዜው አልፎበታል።",
+  "deposit.account_banned": "ይህ አካውንት አሁን ገቢ ማድረግ አይችልም።",
   "withdraw.not_available": "ወጪ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
   "withdraw.usage": "አጠቃቀም፦ /withdraw <መጠን> <ቴሌብር ቁጥር> <ሙሉ ስም>። ዝቅተኛው {min} ብር ነው።",
   "withdraw.invalid_amount": "እባክዎ ትክክለኛ መጠን ያስገቡ፣ ለምሳሌ፦ /withdraw 200 0911223344 አበበ ከበደ",
@@ -64,7 +72,7 @@
   "invite.summary": "የግብዣ አገናኝዎ፦\n{link}\n\nእስካሁን {count} ሰዎች ተቀላቅለዋል።",
   "invite.no_username": "የግብዣ አገናኝ ገና አልተዘጋጀም። እባክዎ ቆየት ብለው ይሞክሩ።",
 
-  "support.info": "እርዳታ ከፈለጉ፣ እባክዎ @jobingo_support ን ያግኙ።",
+  "support.info": "እርዳታ ከፈለጉ፣ እባክዎ @AradaBingo_Support ን ያግኙ።",
   "rules.text": "75 ቁጥር ያለው አራዳ ቢንጎ፦ ካርድ ይምረጡ፣ ቁጥሮች ሲጠሩ ካርድዎ ላይ ምልክት ያድርጉ፣ መስመር፣ አምድ፣ ሰያፍ ወይም አራት ጠርዞችን ሲያጠናቅቁ 'ቢንጎ' ብለው ይጠይቁ። ደራሽ ከተሰበሰበው ገንዘብ ላይ ከኦፕሬተር ክፍያ በኋላ የሚቀረው ነው።",
 
   "language.prompt": "ቋንቋ ይምረጡ፦",

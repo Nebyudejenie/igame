@@ -2,11 +2,21 @@
   "rooms.title": "Rooms",
   "rooms.playing": "Playing — next in ~{seconds}s",
   "rooms.playing_now": "Playing",
-  "rooms.derash_up_to": "Derash up to {amount}",
+  "rooms.derash_amount": "Derash {amount}",
   "rooms.empty": "No rooms available",
+  "rooms.online_label": "online",
+  "rooms.playing_count_label": "playing now",
+
+  "invite.button": "Invite",
+  "invite.panel_title": "Invite friends, play together",
+  "invite.count": "{count} friends joined so far",
+  "invite.share_button": "Share invite link",
+  "invite.share_text": "🎉 Join me on Arada Bingo — real Bingo, real cash, live on Telegram! Tap to play:",
+  "invite.no_link": "Invite links aren't available right now — please try again shortly.",
+  "invite.copied": "Invite link copied",
 
   "lobby.pick_card": "Pick your card",
-  "lobby.starts_in": "Starts {seconds}s",
+  "lobby.starts_in": "{seconds}s to start",
   "lobby.round_voided_underfilled": "Not enough players joined — your stake was refunded.",
   "lobby.cards_held": "Holding {count} card(s)",
   "lobby.card_taken_change": "Card {card} taken · Change",
@@ -35,7 +45,6 @@
 
   "spectate.banner": "This round is in progress. Please wait for a new round.",
   "spectate.next_in": "Next round starts in ~{seconds}s.",
-  "spectate.reserve": "Reserve a card",
 
   "result.win_title": "You won!",
   "result.round_winner_title": "We have a winner!",

@@ -905,6 +905,134 @@ async def test_telebirr_reference_redemption_flow_credits_the_wallet(gateway_ser
         )
 
 
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+    def channel(c: int) -> float:
+        c_norm = c / 255
+        return c_norm / 12.92 if c_norm <= 0.03928 else ((c_norm + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast_ratio(rgb_a: tuple[int, int, int], rgb_b: tuple[int, int, int]) -> float:
+    l1, l2 = sorted([_relative_luminance(rgb_a), _relative_luminance(rgb_b)], reverse=True)
+    return (l1 + 0.05) / (l2 + 0.05)
+
+
+def _parse_rgb(css_color: str) -> tuple[int, int, int]:
+    # getComputedStyle can return either legacy "rgb(r, g, b)" (0-255 per
+    # channel, comma-separated) or, for a color-mix()-computed value in a
+    # real Chromium build, "color(srgb r g b)" (0-1 per channel, space-
+    # separated) -- .destination-display's own background is exactly the
+    # latter case, so both forms need handling, not just the common one.
+    css_color = css_color.strip()
+    if css_color.startswith("color("):
+        parts = css_color.removeprefix("color(").rstrip(")").split()
+        r, g, b = (float(p) * 255 for p in parts[1:4])
+        return round(r), round(g), round(b)
+    nums = [int(float(n)) for n in css_color.strip("rgba() ").replace(" ", "").split(",")[:3]]
+    return nums[0], nums[1], nums[2]
+
+
+async def test_telebirr_destination_stays_readable_on_an_inconsistent_telegram_theme(
+    gateway_server, browser, pool, conn
+):
+    """Real reported bug: the Telebirr deposit destination card's text was
+    unreadable in a real Telegram client -- invisible-looking text on a
+    light card, even though this codebase's own stub-based tests never
+    caught it (every stub always sends an empty themeParams, so
+    applyWalletTheme()'s (app.v6.js) real-theme code path never actually
+    ran against them).
+
+    Root cause: Telegram's own theme_params object is not guaranteed to
+    supply every color field together -- a real client can send a light
+    bg_color with no matching text_color, and the old code left this
+    wallet's dark-mode-default (near-white) text color in place on top of
+    a newly light background. Reproduced here with exactly that
+    inconsistent shape, then checked against the real, computed WCAG
+    contrast ratio -- not just "some color changed" -- so this can never
+    silently regress back to unreadable.
+    """
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=True,
+        reason="e2e test", ip_address=None,
+    )
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="chapa", direction="in", enabled=False,
+        reason="e2e test: force telebirr as the default deposit pane", ip_address=None,
+    )
+    try:
+        unique_suffix = next_telegram_id()
+        await conn.execute(
+            "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active) "
+            "VALUES ('telebirr', '0911000000', $1, true)",
+            f"ContrastTest{unique_suffix}",
+        )
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        # The exact inconsistent shape a real Telegram client can send:
+        # a light background with no text_color to match it.
+        await page.evaluate("""
+        () => {
+            window.Telegram.WebApp.themeParams = {
+                bg_color: '#ffffff',
+                secondary_bg_color: '#f0f0f0',
+                button_color: '#2481cc',
+            };
+        }
+        """)
+
+        await _open_wallet_tab(page, "deposit")
+        await page.wait_for_selector("#deposit-telebirr-section:not(.hidden)", timeout=10000)
+        await page.wait_for_selector(".destination-display", timeout=10000)
+
+        colors = await page.evaluate("""
+        () => {
+            function styleOf(selector) {
+                const el = document.querySelector(selector);
+                const cs = getComputedStyle(el);
+                return { color: cs.color, background: cs.backgroundColor };
+            }
+            return {
+                display: styleOf('.destination-display'),
+                name: styleOf('.destination-name'),
+                ref: styleOf('.destination-ref'),
+            };
+        }
+        """)
+
+        display_bg = _parse_rgb(colors["display"]["background"])
+        for label in ("name", "ref"):
+            text_color = _parse_rgb(colors[label]["color"])
+            ratio = _contrast_ratio(text_color, display_bg)
+            # WCAG AA for normal-size text is 4.5:1 -- the real bug's own
+            # symptom (near-white on near-white) would score close to
+            # 1:1, nowhere near this.
+            assert ratio >= 4.5, (
+                f"{label}: contrast ratio {ratio:.2f}:1 between text {text_color} and "
+                f"background {display_bg} is below WCAG AA (4.5:1) -- text would look "
+                f"invisible or near-invisible, exactly the reported bug"
+            )
+
+        assert console_errors == [], f"JS errors: {console_errors}"
+        await page.close()
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=False,
+            reason="test cleanup", ip_address=None,
+        )
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="chapa", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
+
+
 async def test_balance_pane_shows_total_and_available_with_breakdown_toggle(gateway_server, browser, pool, conn):
     """Total = cash+bonus+locked, Available = (cash+bonus)-locked -- the
     exact same math packages/core/ledger.py::available() already uses,

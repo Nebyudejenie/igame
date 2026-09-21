@@ -13,7 +13,7 @@ migration and confirms both still succeed, then downgrades and confirms
 the pre-existing kinds still work with the narrowed constraint restored.
 
 Revision ID: a3f7c2e91b04
-Revises: a1c9e7f4d2b6
+Revises: c7e2a9f13b8d
 Create Date: 2026-09-17
 
 """
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 
 
 revision: str = "a3f7c2e91b04"
-down_revision: Union[str, None] = "a1c9e7f4d2b6"
+down_revision: Union[str, None] = "c7e2a9f13b8d"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

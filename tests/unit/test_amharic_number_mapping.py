@@ -65,14 +65,27 @@ def test_manifest_filenames_match_bingo_letter_ranges_exactly():
     )
 
 
+# Every Bingo letter spoken as its own English letter *name*, spelled
+# phonetically in Amharic script -- keeps every clip in-script for
+# whichever TTS engine renders it (services/... no, this is a static
+# audio asset, not app code -- see generate_call_audio.py) rather than a
+# bare Latin character. A bare 'B' specifically was confirmed (against
+# Addis AI's TTS, tried first) to deterministically produce 8-11s of
+# unrelated garbled Amharic instead of the letter; spelling every letter
+# out phonetically is the voice-agnostic fix, not a workaround for one
+# engine's own quirk.
+LETTER_PREFIX = {"B": "ቢ", "I": "አይ", "N": "ኤን", "G": "ጂ", "O": "ኦ"}
+
+
 def test_manifest_scripts_say_the_english_letter_and_amharic_number():
     words = _amharic_words()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     for n in range(1, 76):
         letter = letter_for(n)
         key = f"{letter}_{n:02d}"
-        assert manifest[key] == f"{letter}! {words[n]}!", (
-            f"{key}: manifest says {manifest[key]!r}, expected letter {letter!r} + word {words[n]!r}"
+        expected = f"{LETTER_PREFIX[letter]} , {words[n]}"
+        assert manifest[key] == expected, (
+            f"{key}: manifest says {manifest[key]!r}, expected {expected!r}"
         )
 
 
@@ -91,4 +104,4 @@ def test_the_five_worked_examples_from_the_feature_request(number, letter, word)
     words = _amharic_words()
     assert words[number] == word
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    assert manifest[f"{letter}_{number:02d}"] == f"{letter}! {word}!"
+    assert manifest[f"{letter}_{number:02d}"] == f"{LETTER_PREFIX[letter]} , {word}"

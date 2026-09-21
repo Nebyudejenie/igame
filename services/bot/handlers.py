@@ -48,6 +48,23 @@ from services.payments.telebirr_ingest import (
     STATUS_UNPARSEABLE,
     ingest_sms_evidence,
 )
+from services.payments.telebirr_parser import extract_reference
+from services.payments.telebirr_redemption import (
+    CODE_ACCOUNT_BANNED,
+    CODE_COOLING_OFF_ACTIVE,
+    CODE_DAILY_CAP_EXCEEDED,
+    CODE_INVALID_REFERENCE,
+    CODE_PAYMENT_ALREADY_REDEEMED,
+    CODE_PAYMENT_BLOCKED,
+    CODE_PAYMENT_DISPUTED,
+    CODE_PAYMENT_EXPIRED,
+    CODE_PAYMENT_NOT_FOUND,
+    CODE_PAYMENT_REDEEMED,
+    CODE_RATE_LIMITED,
+    CODE_SELF_EXCLUDED,
+    CODE_UNKNOWN_USER,
+    redeem_evidence,
+)
 
 router = Router(name="jobingo-bot")
 
@@ -741,6 +758,101 @@ async def on_agent_sms(message: Message, pool: asyncpg.Pool, notifier: Notifier)
         await notifier.send(message.chat.id, t("agent.ingest_duplicate", language, reference=reference))
     elif outcome.status == STATUS_CONFLICTING_DUPLICATE:
         await notifier.send(message.chat.id, t("agent.ingest_conflicting", language, reference=reference))
+
+
+def _telebirr_reference_in_text(message: Message) -> bool:
+    return message.text is not None and extract_reference(message.text) is not None
+
+
+@router.message(F.text, _telebirr_reference_in_text)
+async def on_customer_telebirr_paste(
+    message: Message, pool: asyncpg.Pool, redis: Redis, notifier: Notifier, settings: Settings
+) -> None:
+    """The same self-service Telebirr redemption the Mini App's own wallet
+    screen already offers (services/payments/telebirr_redemption.py::
+    redeem_evidence(), gateway's POST /api/wallet/deposits/telebirr/redeem)
+    -- now reachable by simply pasting the confirmation SMS as an ordinary
+    chat message here, no command and no trip into the Mini App required.
+    A real user request: after paying, a player already has the SMS on
+    their clipboard -- forcing them to open the wallet, find the Telebirr
+    tab, and paste it there is one detour too many when pasting it right
+    back into this same chat is just as safe.
+
+    Registered after on_agent_sms's own (F.text, is_active_payment_agent)
+    handler above, so an active agent's forwarded SMS (from the platform's
+    own collection-account inbox, a bulk-ingest source) is always claimed
+    by that handler first and never double-handled as their own personal
+    deposit -- aiogram checks handlers in registration order, and an
+    agent's messages never fall through to this one.
+
+    The _telebirr_reference_in_text filter is deliberately strict (a real
+    "transaction number is X" match, never a bare-text fallback): unlike
+    web/miniapp/js/app.v6.js's own extractTelebirrReference() (safe to
+    fall back on raw input, since everything typed into that dedicated
+    field is already reference-shaped), a bare fallback here would swallow
+    ordinary chat messages -- greetings, support questions, menu presses --
+    as failed redemption attempts instead of letting them reach
+    on_menu_text below.
+    """
+    assert message.from_user is not None
+    user, language = await get_user_and_language(pool, message.from_user.id)
+    if user is None:
+        # Same fallback on_menu_text uses for any unrecognized text from an
+        # unregistered sender -- an SMS-shaped message from a stranger is
+        # still just unrecognized text from someone who isn't a player yet,
+        # so it gets the same registration nudge as everything else would.
+        await notifier.send(
+            message.chat.id, t("register.use_button", language), reply_markup=registration_keyboard(language)
+        )
+        return
+
+    methods = await availability.get_payment_availability(pool, settings)
+    if availability.TELEBIRR_SMS_PROVIDER_NAME not in methods["deposit"]:
+        await notifier.send(message.chat.id, t("deposit.not_available", language))
+        return
+
+    reference = extract_reference(message.text or "")
+    assert reference is not None  # guaranteed by this handler's own filter
+
+    outcome = await redeem_evidence(
+        pool, redis, user_id=user.id, reference=reference, daily_cap=settings.daily_deposit_cap_etb,
+    )
+    if outcome.code == CODE_PAYMENT_REDEEMED:
+        assert outcome.amount is not None
+        await notifier.send(
+            message.chat.id, t("deposit.telebirr_redeemed", language, amount=str(outcome.amount))
+        )
+    elif outcome.code == CODE_PAYMENT_NOT_FOUND:
+        await notifier.send(message.chat.id, t("deposit.telebirr_payment_not_found", language))
+    elif outcome.code == CODE_PAYMENT_ALREADY_REDEEMED:
+        await notifier.send(message.chat.id, t("deposit.telebirr_already_redeemed", language))
+    elif outcome.code == CODE_PAYMENT_BLOCKED:
+        await notifier.send(message.chat.id, t("deposit.telebirr_blocked", language))
+    elif outcome.code == CODE_PAYMENT_DISPUTED:
+        await notifier.send(message.chat.id, t("deposit.telebirr_disputed", language))
+    elif outcome.code == CODE_PAYMENT_EXPIRED:
+        await notifier.send(message.chat.id, t("deposit.telebirr_expired", language))
+    elif outcome.code == CODE_RATE_LIMITED:
+        await notifier.send(message.chat.id, t("deposit.rate_limited", language))
+    elif outcome.code == CODE_DAILY_CAP_EXCEEDED:
+        await notifier.send(message.chat.id, t("deposit.daily_cap_exceeded", language))
+    elif outcome.code == CODE_SELF_EXCLUDED:
+        await notifier.send(message.chat.id, t("deposit.self_excluded", language))
+    elif outcome.code == CODE_ACCOUNT_BANNED:
+        await notifier.send(message.chat.id, t("deposit.account_banned", language))
+    elif outcome.code == CODE_COOLING_OFF_ACTIVE:
+        await notifier.send(message.chat.id, t("deposit.cooloff_active", language))
+    elif outcome.code == CODE_UNKNOWN_USER:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
+    elif outcome.code == CODE_INVALID_REFERENCE:
+        # Unreachable in practice -- this handler's own filter only ever
+        # matches text extract_reference() already found a code in, so
+        # redeem_evidence() never actually sees an empty reference here.
+        # Handled anyway so every real RedemptionCode has an explicit,
+        # correct reply rather than falling into the generic catch-all.
+        await notifier.send(message.chat.id, t("deposit.telebirr_invalid_reference", language))
+    else:
+        await notifier.send(message.chat.id, t("deposit.provider_error", language))
 
 
 @router.message(F.text)

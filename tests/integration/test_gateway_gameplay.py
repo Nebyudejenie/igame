@@ -92,7 +92,7 @@ async def test_full_gameplay_over_websocket(gateway_server, pool, redis, card_po
 
             await ws.send(json.dumps({"t": "take_card", "room_id": room_id, "card_no": 1}))
             ack = await recv_until(ws, "ack")
-            assert ack == {"t": "ack", "for": "take_card", "ok": True, "reason": None}
+            assert ack == {"t": "ack", "for": "take_card", "ok": True, "reason": None, "room_id": room_id}
 
             cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
             assert await ledger.balance(conn, cash.id) == Decimal("90.00")
@@ -150,7 +150,7 @@ async def test_take_card_uses_the_players_persisted_auto_mark_preference(
             await recv_until(ws, "state_sync")
             await ws.send(json.dumps({"t": "take_card", "room_id": room_a, "card_no": 1}))
             ack = await recv_until(ws, "ack")
-            assert ack == {"t": "ack", "for": "take_card", "ok": True, "reason": None}
+            assert ack == {"t": "ack", "for": "take_card", "ok": True, "reason": None, "room_id": room_a}
 
             round_a_id = await pool.fetchval(
                 "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_a
@@ -163,7 +163,7 @@ async def test_take_card_uses_the_players_persisted_auto_mark_preference(
 
             await ws.send(json.dumps({"t": "set_auto", "room_id": room_a, "auto": False}))
             set_auto_ack = await recv_until(ws, "ack")
-            assert set_auto_ack == {"t": "ack", "for": "set_auto", "ok": True, "reason": None}
+            assert set_auto_ack == {"t": "ack", "for": "set_auto", "ok": True, "reason": None, "room_id": room_a}
 
         assert await pool.fetchval(
             "SELECT auto_mark_preference FROM users WHERE id = $1", user_id
@@ -181,7 +181,7 @@ async def test_take_card_uses_the_players_persisted_auto_mark_preference(
             await recv_until(ws2, "state_sync")
             await ws2.send(json.dumps({"t": "take_card", "room_id": room_b, "card_no": 1}))
             ack2 = await recv_until(ws2, "ack")
-            assert ack2 == {"t": "ack", "for": "take_card", "ok": True, "reason": None}
+            assert ack2 == {"t": "ack", "for": "take_card", "ok": True, "reason": None, "room_id": room_b}
 
         round_b_id = await pool.fetchval(
             "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_b
@@ -271,6 +271,7 @@ async def test_claim_is_rate_limited_after_three_false_claims_in_one_session(
                     "valid": False,
                     "reason": "no_pattern",
                     "card_no": 1,
+                    "round_id": round_id,
                 }, f"attempt {attempt}: {result}"
 
                 await wait_until(lambda: engine.status == "idle", timeout=15)

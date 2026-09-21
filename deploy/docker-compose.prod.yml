@@ -28,10 +28,25 @@ name: jobingo-prod
 
 x-app-env: &app-env
   env_file: .env
+  # jobingo-postgres/jobingo-redis, never the bare postgres/redis: an
+  # `environment:` key here always wins over the same key in `.env`
+  # (env_file: is only a fallback default), so hardcoding the real
+  # production host's own container_name aliases directly here is what
+  # actually closes DECISIONS.md's 2026-09-02 incident for good -- on
+  # that host, gateway/payments/admin/bot are dual-homed onto a second,
+  # shared Docker network for Traefik ingress, which has its own
+  # container aliased plainly "postgres"/"redis" (an unrelated app's).
+  # Docker's embedded DNS resolved the bare service name ambiguously
+  # across both networks and silently pointed these services at the
+  # wrong database for ~19.5 hours before that was caught. Whatever this
+  # exact string said before that incident is irrelevant now -- even a
+  # correctly-fixed `.env` on disk can never override this line, which is
+  # the point: the fix is no longer something a hand-maintained,
+  # gitignored secrets file has to remember to get right.
   environment:
-    DATABASE_URL: postgresql://${POSTGRES_USER:-jobingo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-jobingo}
-    DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-jobingo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-jobingo}
-    REDIS_URL: redis://redis:6379/0
+    DATABASE_URL: postgresql://${POSTGRES_USER:-jobingo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@jobingo-postgres:5432/${POSTGRES_DB:-jobingo}
+    DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-jobingo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@jobingo-postgres:5432/${POSTGRES_DB:-jobingo}
+    REDIS_URL: redis://jobingo-redis:6379/0
 
 x-app-depends-on: &app-depends-on
   postgres:
@@ -45,6 +60,13 @@ services:
   postgres:
     image: postgres:15
     restart: unless-stopped
+    # Host-wide-unique name, same reasoning as deploy/docker-compose.yml's
+    # own container_name -- see DECISIONS.md's 2026-09-02 entry and that
+    # file's comment. x-app-env above should point every service's
+    # DATABASE_URL at `jobingo-postgres` specifically, never bare
+    # `postgres`, on any host where this stack shares a Docker network
+    # with unrelated containers.
+    container_name: jobingo-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-jobingo}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
@@ -74,6 +96,7 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
+    container_name: jobingo-redis
     volumes:
       - jobingo_prod_redis_data:/data
     healthcheck:

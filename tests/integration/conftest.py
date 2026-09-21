@@ -17,6 +17,10 @@ import uvicorn
 # read is what the whole suite gets -- including the gateway app under test,
 # which needs a token the test's own initData-building helper also knows.
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-bot-token-for-suite")
+# Gateway's /api/invite builds https://t.me/{username}?start=ref_{id} from
+# this -- left unset, every test would see link: None, since Settings has
+# no safe non-empty default to fabricate one from.
+os.environ.setdefault("TELEGRAM_BOT_USERNAME", "aradabingo_test_bot")
 # Same reasoning for the payments app under test: it builds a real
 # ChapaProvider from settings.chapa_api_key at startup, so a webhook test
 # needs to know the exact secret to sign its test payloads with.

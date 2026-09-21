@@ -27,6 +27,61 @@
   margin-bottom: 12px;
 }
 
+/* The first thing a player sees on open, right under the balance --
+   how alive the platform is right now. "Online" is a real headcount of
+   open WebSocket connections (services/gateway/connection.py); "Playing"
+   is the sum of every room's own distinct-player count, which honestly
+   includes simulated players (they hold real round_entries rows, just
+   never a WebSocket of their own) -- exactly the "a room doesn't feel
+   empty" effect that feature exists for. */
+.rooms-activity-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.rooms-activity-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rooms-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.rooms-activity-dot.online {
+  background: var(--call);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--call) 70%, transparent);
+}
+
+.rooms-activity-dot.playing {
+  background: var(--gold);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--gold) 70%, transparent);
+  animation: roomsActivityDotPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes roomsActivityDotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-activity-dot.playing {
+    animation: none;
+  }
+}
+
 .balance-pill {
   display: flex;
   align-items: center;
@@ -58,6 +113,27 @@
 
 .wallet-fab-icon {
   flex-shrink: 0;
+}
+
+/* Gold, not --accent: this is the one header action meant to read as a
+   reward/growth prompt rather than a utility (wallet/voice), same gold
+   already used for FREE cells and the "playing" activity dot. */
+.invite-fab {
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, #fff 35%, transparent), transparent 60%),
+    var(--gold);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--gold) 55%, transparent);
+  color: #1a1200;
+}
+
+.invite-panel-title {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.invite-count {
+  font-size: var(--fs-sm);
+  color: var(--muted);
 }
 
 .wallet-fab-label {
@@ -218,6 +294,45 @@
 .lobby-connection-pill.connected {
   border-color: var(--call);
   color: var(--call);
+}
+
+/* The lobby countdown -- previously plain .stat-value gray, indistinguishable
+   from "Players: 5". This is the one number on the whole screen a player is
+   actually watching tick down toward a real money-committing moment, so it
+   gets its own color and a per-second pulse instead of sitting flat. */
+#lobby-countdown {
+  color: var(--gold);
+  font-size: var(--fs-lg);
+  font-weight: 800;
+}
+
+#lobby-countdown.lobby-countdown-tick {
+  animation: lobbyCountdownPulse 0.35s ease-out;
+}
+
+/* Last 3 seconds: switches to --danger and pulses continuously rather
+   than once per tick, so the final stretch reads as genuinely urgent
+   instead of just "still counting." */
+#lobby-countdown.lobby-countdown-urgent {
+  color: var(--danger);
+  animation: lobbyCountdownUrgent 0.6s ease-in-out infinite;
+}
+
+@keyframes lobbyCountdownPulse {
+  0% { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+
+@keyframes lobbyCountdownUrgent {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.18); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #lobby-countdown.lobby-countdown-tick,
+  #lobby-countdown.lobby-countdown-urgent {
+    animation: none;
+  }
 }
 
 .lobby-connection-pill.connected .lobby-connection-dot {
@@ -860,6 +975,51 @@
   margin-bottom: 10px;
   font-size: var(--fs-sm);
   color: var(--muted);
+}
+
+/* Admin-configurable scrolling banner (services/admin/announcement_
+   queries.py), shown in place of the old "Reserve a card" button --
+   that button re-synced the whole spectate view for zero real benefit
+   (join() can't assign a card mid-round; the player auto-advances into
+   the next round regardless), so this space is put to actual use
+   instead. Two identical copies of the text sit back to back in a
+   track twice the visible width; animating that track from 0% to -50%
+   moves the content right-to-left with no visible seam -- the moment
+   the first copy has fully exited, the second copy is in exactly the
+   position the first started in, so the loop restart is invisible. */
+.announcement-marquee {
+  overflow: hidden;
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.announcement-marquee-track {
+  display: flex;
+  width: max-content;
+  animation: announcement-marquee-scroll 14s linear infinite;
+}
+
+.announcement-marquee-track span {
+  white-space: nowrap;
+  padding-right: 48px;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--gold);
+}
+
+@keyframes announcement-marquee-scroll {
+  from { transform: translateX(0%); }
+  to { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .announcement-marquee-track {
+    animation: none;
+  }
+  .announcement-marquee {
+    overflow-x: auto;
+  }
 }
 
 /* --- 2.5 Result --- */

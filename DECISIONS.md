@@ -11960,3 +11960,54 @@ completely rather than reconciling around it; see the follow-up
 verification (migration-from-clean output, a real `ledger.reconcile()`
 pass, a full Bingo+Keno suite run, and a live proof that the append-only
 trigger genuinely blocks a bare DELETE) immediately below this entry.
+
+**Follow-up verification, run after merging in a second, independently
+diverged checkout (`~/AradaBingo`, 22 commits, its own two migrations)
+that shared this exact dev database** — the Keno migration chain was
+rebased to chain after the merged-in migrations
+(`a3f7c2e91b04`'s `down_revision` moved from `a1c9e7f4d2b6` to
+`c7e2a9f13b8d`), giving one linear head again (`b8e4a1f0c3d7`, confirmed
+via `alembic heads`). Direct inspection of the live dev database (target
+proven first: container `jobingo-postgres-1`, `localhost:5433`, db
+`jobingo` — not production, which runs on a separate host per the
+2026-09-02 entry) then found every migration's DDL through the new head
+genuinely already applied — all nine `keno_*` tables, the widened
+`simulated_players_settings` cap constraint, `platform_announcement`, and
+both append-only triggers all physically present and matching their
+migration files exactly — but the `alembic_version` bookkeeping row
+lagged one revision behind reality. Confirmed with the operator before
+acting (auto-mode itself independently flagged the write as a
+shared-resource action); fixed with `alembic stamp b8e4a1f0c3d7`
+(bookkeeping-only, zero data touched) rather than a second drop/recreate,
+since a fresh forensic read — not a repeat of the original mistake —
+showed the schema itself was never actually wrong.
+
+- `ledger.reconcile(pool)` against the live dev database: `[]` — zero
+  mismatches.
+- Bare `DELETE` against `ledger_entries`, attempted for real inside a
+  transaction against a real existing row: blocked. `ERROR:
+  ledger_entries is append-only; DELETE on ledger_entries is not allowed
+  -- post a reversing ledger.post() entry instead.` Transaction aborted;
+  no rollback needed.
+- Full suite, `pytest tests/ -q`: **1551 passed, 2 failed, 85 deselected**
+  in 745.76s. Both failures independently reproduced and root-caused,
+  neither touches ledger, migrations, RBAC, simulated players, or Keno:
+  - `test_sms_app.py::test_full_campaign_to_delivery_flow_over_real_http`
+    — genuinely racy against a shared dev SMS node fetch-job queue (three
+    reruns produced three different failure points: wrong job body once,
+    wrong campaign status once, wrong job body again), an SMS Control
+    Plane test-isolation gap unrelated to this session's changes.
+  - `test_backup_restore.py::test_wal_archiving_supports_point_in_time_recovery`
+    — deterministic in this session only, root-caused by hand: the live
+    `jobingo-postgres-1` container is bind-mounted to
+    `~/AradaBingo/backups/wal_archive` (it was started from that sibling
+    checkout's compose file), while `restore_pitr.sh`/`basebackup.sh`
+    running from `~/game` resolve WAL archive paths relative to their own
+    script location and look in `~/game/backups/wal_archive`, which is
+    empty — recovery can't find the WAL segment its own checkpoint
+    requires. Confirmed by manually replaying `restore_pitr.sh`'s own
+    `docker run` without `--rm` to catch the container before it
+    self-removed: `cp: cannot stat '/wal_archive/...': No such file or
+    directory`. An artifact of two checkouts sharing one Postgres
+    container in this dev session, not a code defect — doesn't occur in
+    the one-checkout topology any real deployment uses.
