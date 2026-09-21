@@ -574,7 +574,7 @@ function spawnConfetti() {
   }
 }
 
-// --- provably-fair verification (reuses round_detail + keno's own
+// --- verifiable commit-reveal draw check (reuses round_detail + keno's own
 // verified flag, computed server-side the same way Bingo's fairness
 // panel already does for its own rounds) --------------------------------
 

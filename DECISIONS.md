@@ -12087,3 +12087,239 @@ would need a parallel 80-clip set generated the same way
 `generate_call_audio.py` produced Bingo's own 75) and the onboarding
 overlay's "three pictures" (large emoji stand in for real illustrations —
 no design assets exist in this repo to source real ones from).
+
+## 2026-09-21 — Single source of truth: igame is the only active repo, `~/AradaBingo` archived
+
+The two-checkout-sharing-one-dev-database setup that caused this same
+day's alembic-bookkeeping incident and the PITR/WAL-archive-path bug
+(both entries above) was itself the root cause worth removing, not just
+working around per-incident. Operator decision: `igame` (this repo) is
+the sole active repository going forward; `~/AradaBingo` (`game`) is
+archived, not deleted.
+
+**Final merge check**: `git log 05e531a..aradabingo/main` — zero commits.
+`~/AradaBingo`'s own `main` (`dae030f`) was already fully merged by
+`05e531a`; its working tree carried no uncommitted or unpushed work
+either (one stray untracked `.m4a` recording, not source code). Nothing
+to merge.
+
+**Dev Postgres/Redis recreated from `~/game`'s own compose file**, closing
+the WAL-archive-path bug for real rather than just diagnosing it: stopped
+and removed `jobingo-postgres-1`/`jobingo-redis-1` (started from
+AradaBingo's compose file) via `docker compose stop && rm -f`, *not*
+`down -v` — both services use named Docker volumes
+(`jobingo_jobingo_postgres_data`/`jobingo_jobingo_redis_data`), and the
+project name is `jobingo` in both checkouts' compose files (declared
+explicitly, not derived from directory name), so recreating via
+`~/game/deploy`'s `docker compose up -d` correctly reattached the exact
+same volumes. Verified before/after: identical `users`/`ledger_entries`/
+`keno_rounds` row counts, identical `alembic_version`, the
+`jobingo_dev_fixture` role still present. The new containers are named
+`jobingo-postgres`/`jobingo-redis` (no more auto-generated `-1` suffix,
+now matching the `container_name:` directive both checkouts' compose
+files already declare) and the WAL archive bind mount now correctly
+resolves to `~/game/backups/wal_archive`.
+`test_wal_archiving_supports_point_in_time_recovery` now passes for
+real — rerun standalone and as part of the full suite, not asserted.
+
+**A second, independent instance of the exact same container-name bug,
+found investigating production deploy readiness**: `.github/workflows/
+ci.yml`'s own "Wait for Postgres" step still polls a hardcoded
+`jobingo-postgres-1` — CI provisions its own ephemeral Postgres via the
+same compose file, which (since `container_name: jobingo-postgres` was
+added) has named it `jobingo-postgres` for weeks now. Every CI run on
+both `igame` and `game` has been failing at that exact step since
+(`gh run list` confirms failures going back to 2026-09-17 on `igame` and
+earlier on `game`) — meaning `cd.yml`'s `deploy` job, gated on
+`workflow_run.conclusion == 'success'`, has never actually run on either
+repo in that entire window; every CD run shows `skipped`. Confirmed via
+`gh api .../actions/runners` that **neither repo currently has a
+registered self-hosted runner** either, so even a green CI wouldn't
+deploy anything right now. Reported to the operator, not fixed — outside
+this entry's own scope (consolidating which repo/database is authoritative),
+and touching `ci.yml` wasn't requested.
+
+**Production deploy source — could not be fully confirmed, no SSH access
+to the production host from this environment.** Evidence assembled
+instead: `game` was created 2026-08-22; `igame` didn't exist until
+2026-09-17 (`gh api repos/.../{repo}` `created_at`, neither is a fork of
+the other). The first documented real production incident (this file's
+own 2026-09-02 entry, "gateway/payments/admin/bot were talking to the
+wrong Postgres and Redis entirely," fixed via direct SSH access to the
+production host) happened three weeks before `igame` existed at all —
+production cannot have been deploying from a repo that didn't yet exist.
+Strong circumstantial case that `game` is (or was, as of whenever it was
+last touched) the production source, but not a substitute for actually
+checking that host's own checkout — flagged to the operator rather than
+asserted as fact.
+
+## 2026-09-21 — Simulated players: real-money interaction with real players, precisely traced
+
+Operator asked, before allowing any further Keno build work, exactly how
+"Simulated Players" (house-funded bot accounts that join real Bingo rooms
+so they don't feel empty at launch) interact with real players' money.
+Traced end to end, no special-casing found anywhere:
+
+- **A bot can win a real shared pot.** `services/engine/round_engine.py`
+  has zero `is_simulated` branches (grepped). `claim()` (round_engine.py
+  :535-635) runs the identical `bingo.winning_patterns()` check for every
+  `(user_id, card_no)` regardless of who the user is; settlement
+  (`_settle_with_winners()`, :993-1154) builds payout ledger entries from
+  whichever `(user, share)` pairs won, with no filter. Proven by
+  `tests/integration/test_simulated_players.py::
+  test_bot_and_real_player_share_a_pot_and_settle_correctly`.
+- **Funding and stakes are fully commingled**, not segregated. A bot's
+  initial balance (5,000.00 ETB, `INITIAL_SIMULATED_BALANCE`) comes from
+  the singleton `house_float` account
+  (`services/admin/simulated_players_queries.py:75-117`). Once funded,
+  the bot-runner (`services/engine/simulated_players_worker.py`, a
+  standalone process) drives it through the *exact same* Redis-Stream
+  `join` command a real player's WebSocket action uses — there is no
+  separate bot code path in `round_engine.py`. Every stake, bot or real,
+  posts into the same singleton `pot_escrow` account
+  (round_engine.py:423-430).
+- **Winnings post straight to the bot's own real `user_cash` account**
+  from that same shared pot — no house top-up needed, since the payout
+  is drawn from money real players also contributed. **Reset** doesn't
+  cap at "up to the seed amount" — it always tops *or drains* back to
+  exactly 5,000.00 ETB in either direction
+  (`reset_simulated_player_admin()`, simulated_players_queries.py
+  :478-517); a bot that won real money and got reset returns the excess
+  to `house_float`, proven by `test_reset_tops_balance_back_to_5000_and_
+  disables` (a bot credited to 5,500.00 via a real payout, then reset,
+  ends at exactly 5,000.00).
+- **Not disclosed to real players, anywhere.** `is_simulated` never
+  reaches a real client — absent from `services/gateway/queries.py`'s
+  round-entries query and from `_settle_with_winners()`'s own
+  `round_end` broadcast (user_id/display_name/card_no/pattern/amount/
+  grid only). Bot headcount is folded directly into the public "online"
+  counter real players see (`services/gateway/connection.py:227-233`).
+  No badge/icon exists anywhere under `web/miniapp/` distinguishing a
+  bot's card or win from a human's — confirmed by grep, and by
+  `css/screens.css:29-35`'s own comment: "Playing… honestly includes
+  simulated players… exactly the 'a room doesn't feel empty' effect."
+  **Flagged to the operator as a disclosure/compliance question, not
+  decided here** — this is a business/legal call, not an engineering one.
+- **Keno is structurally blocked**, not just absent by omission.
+  `SimulatedPlayerCannotPlaceKenoTicket`
+  (`packages/core/keno_tickets.py:80-87`) is checked inside
+  `_place_ticket()` (the single function that ever inserts into
+  `keno_tickets` — grepped, one `INSERT` in the whole file) before the
+  round lookup. The bot-runner never calls into Keno at all.
+
+## 2026-09-21 — Full spec-compliance audit, Parts 3/4/6/7 — real gaps found, launch-blocking
+
+Ran before any further Keno feature work, per operator instruction ("Keno
+must not be enabled in production until [missing Part 7 items, Part 14,
+Part 15, Part 17] are complete"). Every test claim below was actually run
+against the real `.venv`/DB, not assumed. Full per-requirement evidence
+(file:line + exact quoted code) lives in the audit transcript this entry
+summarizes — `docs/keno/PROGRESS.md` is the living pointer to what's
+current; ask for the full transcript if the summary below isn't enough
+detail to act on a specific item.
+
+**Top-line, launch-blocking on its own**: the Keno round engine is never
+wired into any deployed process. `deploy/docker-compose.prod.yml` has
+zero Keno services; `services/engine/worker.py` (the real
+`engine-worker` container's entrypoint) only claims Bingo `rooms` and
+never imports `KenoRoundEngine`. `KenoRoundEngine.run_forever()` is only
+ever invoked from test code. Every "PASS" below is code that's
+genuinely solid but has only ever been exercised by a test manually
+driving it — nothing creates a Keno round outside a test process today.
+
+**Solid, genuinely well-built** (PASS, with real tests, rerun and
+confirmed): the hypergeometric probability math (`packages/core/
+keno.py`'s `_probability_fraction()`, exact `Fraction` arithmetic, 44
+unit tests passing); the RTP guardrail enforced at the one real
+paytable-creation path (`create_paytable_admin()` calling
+`keno.validate_paytable_rtp()`, not just displayed); the draw function's
+structural ticket-data isolation (`derive_keno_draw(server_seed,
+public_seed, *, pool_size, draw_count)` — a real `inspect.signature()`
+test plus an independent AST-walk test, both passing); the bet-placement
+transaction shape (lock round, lock wallet row, exposure/share checks
+before money moves, DB-enforced idempotency via a real `UNIQUE` index on
+both `keno_tickets.idempotency_key` and `ledger_transactions.
+idempotency_key`); `CHECK (balance >= 0)` on `account_balances`
+(inherited from the pre-existing ledger, applies to Keno automatically);
+the paytable-pinned-at-round-creation rule; the dashboard's reserve/
+player-liability split as two genuinely distinct figures.
+
+**Confirmed real gaps, most-serious first**:
+
+1. **`server_seed` leaks pre-settlement via the API.** `GET /api/keno/
+   rounds/{id}` (`round_detail()`, `packages/core/keno_queries.py:
+   135-165`) gates `verified` on `status in ('completed','failed')` but
+   serializes `server_seed` for *any* status the instant the column is
+   non-null — which is from round creation, always. Any authenticated
+   player can read the live seed for the currently-open round before or
+   during the draw, defeating commit-reveal for that round. Code-review
+   finding (static read), not yet reproduced against a live round.
+2. **Settlement is literally N+1 transactions** — one `pool.acquire()` +
+   `conn.transaction()` per ticket in `keno_round_engine.py`'s
+   settlement loop, the exact anti-pattern spec 6.2 names.
+3. **No way for an operator to actually fund or withdraw `keno_reserve`.**
+   `keno_reserve_deposit`/`keno_reserve_withdrawal` exist as allowed
+   ledger transaction kinds, posted nowhere outside a test. No
+   withdrawal-floor enforcement exists because withdrawal doesn't exist.
+4. **Automated tier promotion/demotion and the daily circuit breaker are
+   unbuilt.** `keno_tier_state.candidate_tier_id`/`candidate_since`
+   exist specifically for 7-consecutive-day promotion tracking and are
+   never written by anything except a manual admin override (which
+   always resets them to NULL). `keno_configs.daily_payout_circuit_
+   breaker_multiple` is written to the schema, never read by any
+   application code.
+5. **Most declared Keno metrics are dead**: `keno_round_exposure_ratio`,
+   `keno_player_liability`, `keno_reserve_balance` are declared `Gauge`s
+   that are never `.set()` anywhere. `deploy/prometheus/alerts.yml` has
+   zero Keno rules — no liability-near-cash alert, no exposure>80%
+   alert.
+6. **Only the `low_variance` paytable profile exists, anywhere** — code
+   or tests. `standard` (required for Tier 3+) has never been created.
+7. **No risk-of-ruin simulator** exists in `services/admin/` at all.
+8. **No production seed/bootstrap for the Part 7.5 launch defaults** —
+   the correct values (82% RTP target, Tier 1, 16x cap, 10/20/50 ETB
+   stakes, 800 ETB max win, 45s round cycle) only exist inside test
+   fixtures. An operator would have to hand-enter every value via the
+   admin API before Keno had any config at all — and per the top-line
+   finding, it still wouldn't run anywhere.
+9. **`scripts/verify-round.ts` and 11 of the 12 required `docs/keno/
+   *.md` files don't exist** (only `00-discovery.md` does; `docs/keno/
+   paytable.md` also missing).
+10. **Keno never checks `packages/core/responsible_gaming.py`.**
+    `keno_tickets.py`'s only import line has no `responsible_gaming` —
+    grepped, confirmed absent. A self-excluded or over-daily-limit
+    player can place Keno tickets freely today. This is spec 3.3's own
+    "mandatory" per-user daily/loss limit, not only a Part 14 item.
+11. **Round-exposure computation uses closed-form CLT (mean+variance),
+    not Monte Carlo** as spec 7.3 literally specifies — a deliberate,
+    well-reasoned, documented substitution (`packages/core/
+    keno_exposure.py`'s own docstring explains why), but a real
+    deviation from the letter of the spec, and not cached/invalidated
+    on paytable change as also specified.
+12. Two internal "provably-fair" wording lapses outside UI/docs (spec
+    4.3's letter is about UI/docs specifically, so not a literal
+    violation, but a discipline gap): `web/miniapp/js/keno.js:577`'s own
+    comment, and `tests/integration/test_keno_miniapp_e2e.py:201`'s
+    comment. **Player-facing UI is already correctly worded** —
+    `locales/{en,am}.json`'s `fairness.*` keys never say "certified" or
+    "provably fair," matching spec 4.3 exactly. Fix going forward: no
+    more "provably-fair" in code comments or commit messages describing
+    Keno; say "verifiable commit-reveal" instead.
+
+**One unresolved, only-sometimes-reproducible test finding**, flagged
+rather than either dismissed or treated as confirmed: running
+`test_keno_round_engine.py` combined with `test_keno_tickets.py` in the
+same invocation produced, once, a 20s timeout waiting for round
+completion, and separately, once, a `ledger.reconcile()` mismatch at
+session teardown after `test_stuck_round_is_marked_failed_and_refunded`.
+Neither reproduced across 3 isolated reruns of the same file. Smells
+like cross-file state bleed on the shared session-scoped pool rather
+than a deterministic bug, but not fully ruled out as a real race —
+worth a closer look before Part 17's load/chaos work, not before.
+
+**Bottom line**: the math and the transaction mechanics are genuinely
+solid engineering. The operational safety machinery around them —
+reserve funding, tier automation, the circuit breaker, alerting, and the
+engine actually running anywhere — is mostly unbuilt. Several of these
+are one-line items in the spec's own Part 20 Definition of Done that are
+currently unmet.

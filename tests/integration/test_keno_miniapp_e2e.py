@@ -198,7 +198,8 @@ async def test_keno_screen_full_flow_bet_to_result_over_a_real_browser(gateway_s
 
         await page.screenshot(path="/tmp/keno-result-screen.png")
 
-        # Provably-fair verification (spec 4.1/13): re-derives this exact
+        # Verifiable commit-reveal draw check (spec 4.1/4.3/13; never call
+        # this "provably fair" -- spec 4.3's own wording): re-derives this exact
         # round's draw server-side from its own revealed seed, the same
         # capability Bingo's own fairness panel already proves for its
         # rounds. keno_round_engine.py's own _settle_and_complete() settles

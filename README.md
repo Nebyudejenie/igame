@@ -1,5 +1,13 @@
 # Arada Bingo
 
+**github.com/Nebyudejenie/igame is the only active repository as of
+2026-09-21.** `~/AradaBingo` (github.com/Nebyudejenie/game) is archived,
+not deleted — two checkouts sharing one dev Postgres container had
+already caused a real migration-bookkeeping incident and a real broken
+backup-restore test (both in `DECISIONS.md`'s 2026-09-21 entries). All
+work happens in this checkout from now on; every commit pushes to
+`igame`.
+
 Real-money multiplayer bingo on Telegram for the Ethiopian market. The full
 product/architecture spec lives in [`idea.md`](idea.md) (see especially the
 "Jo Bingo" sections starting at line 4776 — that's the authoritative
