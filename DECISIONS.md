@@ -12323,3 +12323,106 @@ reserve funding, tier automation, the circuit breaker, alerting, and the
 engine actually running anywhere — is mostly unbuilt. Several of these
 are one-line items in the spec's own Part 20 Definition of Done that are
 currently unmet.
+
+## 2026-09-21 — The three "no-decision" Part 7 audit gaps closed, plus two more real bugs the fixes themselves surfaced
+
+Operator approved starting the audit's "no real design decision needed"
+items immediately: wire the engine into a real process, fix the
+`server_seed` leak, batch settlement. All three done; two more genuine
+bugs turned up while doing so, both fixed and both proven live, not just
+by unit test.
+
+**`server_seed`/`drawn_numbers` no longer leak pre-settlement.**
+`packages/core/keno_queries.py::round_detail()` now gates both on the
+same terminal-status check `verified` already used — `server_seed_hash`
+and `public_seed` stay ungated (both are meant to be public from the
+moment they exist). New test:
+`test_round_detail_hides_server_seed_and_draw_before_the_round_is_terminal`
+seeds a round in `'drawing'` status with both columns already populated
+(the exact real window the leak was reachable in) and asserts both come
+back `None`. The Mini App needed zero changes — `verifyResult()` already
+had a `fairness.not_yet` fallback for exactly this case.
+
+**Settlement batched into one transaction per round, not one per
+ticket.** `services/engine/keno_round_engine.py::_settle_tickets()`'s
+per-ticket `for` loop used to open a fresh `pool.acquire()` +
+`conn.transaction()` for every ticket; now the whole loop runs inside one
+transaction, with WS/balance-update publishes moved to after it commits
+(every player in a round now learns their result at the same moment,
+not staggered by loop order). Per-ticket idempotency keys are unchanged
+and still unique-indexed, so a crash mid-batch and retry are exactly as
+safe as before. New test:
+`test_settlement_batches_every_ticket_in_the_round_together` — five
+different users' tickets in one round, same picks, asserts all five
+settle to the identical outcome.
+
+**`services/engine/keno_worker.py` created — the real production
+entrypoint that never existed.** Mirrors `services/engine/worker.py`'s
+own shape one level down: Keno has one global round cycle, not one
+engine per room, so there's no room-claiming layer to build, just
+start/recover/run/stop with the same signal-handling and per-iteration
+exception isolation `worker.py` already established. Metrics on port
+8008 (8000-8007 already taken — confirmed by grep across every other
+service's own `METRICS_PORT`/`--port`). Proven live, not just by test:
+ran it directly against the dev database (`python -m
+services.engine.keno_worker`) for real — 113 real rounds created and
+completed over several minutes, `ledger.reconcile()` clean (`[]`)
+afterward.
+
+**That live run caught a real bug the unit tests never would have**:
+the SIGTERM handler only set an outer polling loop's `asyncio.Event`,
+never called `engine.stop()` (which sets the *engine's own* internal
+`_stop_requested`, the only flag `run_forever()`'s inner loop actually
+checks) — so the process needed `SIGKILL` to actually exit, and Redis's
+`keno:round:lock` was left held afterward rather than released. Caught
+by literally sending the worker `SIGTERM` and timing how long it took to
+exit. Fixed by having the signal handler call `engine.stop()` directly;
+reverified the same way — exits in ~1.4s, log shows it draining the
+in-flight settlement task first, lock genuinely empty afterward.
+
+**A second real bug, found while wiring the periodic recovery sweep this
+process needed**: `recover_on_startup()` (Part 5.3) only ever runs once,
+at `run_forever()`'s own start — a round that fell into `'settling'` and
+got orphaned there *during* an otherwise-healthy long session (its
+`_settle_and_complete()` task raised and was swallowed, by that method's
+own design, so as not to kill the main loop) would never be revisited
+until the whole process restarted, despite that method's own comment
+promising "the next recovery sweep." Fixed with
+`_recover_stuck_settling_rounds()`, called once per round cycle from
+`_run_one_round()` — safe to call unconditionally because `'settling'`
+is the *only* non-terminal status that can legitimately exist outside
+the one round `_run_one_round()` is actively, synchronously driving at
+any given moment (everything else would mean two round-cycles running
+concurrently, which the lock already prevents); a new
+`self._settling_round_ids` set (populated/cleared alongside the existing
+`_settlement_tasks` bookkeeping in `_spawn_settlement()`) tells a round
+with a real in-flight task apart from one that's been orphaned.
+
+**A third, related bug surfaced while writing that fix's own tests**:
+`recover_on_startup()`'s age-based fail-and-refund path applied
+uniformly to every non-terminal status, including `'settling'` — so an
+old-enough stuck settling round got refunded instead of retried,
+directly contradicting spec 5.3's own text ("Crashed in SETTLING ->
+re-run; idempotency keys make paid tickets no-ops," never "refund if
+it's been too long"). Since the draw is already deterministic and
+immutable by the time a round reaches `'settling'`, refunding instead of
+re-settling would have handed every ticket its stake back regardless of
+whether it actually won — wrong for any ticket that did. Fixed:
+`'settling'` is now exempt from the age check and always retried. Three
+new tests cover all three angles: an old (1-hour) stuck settling round
+gets retried and correctly resolves to won/lost, never refunded; a fresh
+orphaned settling round gets picked up by the periodic sweep specifically
+(not just the age-threshold path); and a genuinely in-flight settling
+round (simulated via `_settling_round_ids`) is left alone by the sweep,
+proving it can't double-settle a round that's already being handled.
+
+**Verification**: mypy clean; `test_keno_round_engine.py` full file
+(7 tests, up from 3) reran three times clean; full suite reran clean —
+**1556 passed** (up from 1551 by exactly the 5 new tests above), 2
+failed, both reconfirmed as the same pre-existing full-suite-load
+flakiness this session already documented (the known SMS race, plus
+`test_admin_telebirr.py::test_finance_can_view_but_not_configure_
+payment_agents` this run — passed 3/3 in isolation, a file untouched by
+any of this work). A third file now joins that same "flaky only under
+full concurrent load" list alongside the SMS test and the earlier
+round-engine one — worth a closer look eventually, not urgent now.

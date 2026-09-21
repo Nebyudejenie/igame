@@ -89,6 +89,17 @@ class KenoRoundEngine:
         self._lock = KenoRoundLock(redis, worker_id=self._worker_id)
         self._stop_requested = False
         self._settlement_tasks: set[asyncio.Task[None]] = set()
+        # round_ids with a currently in-flight _settle_and_complete() task
+        # -- lets _recover_stuck_settling_rounds() (Part 5.3) tell a
+        # round that's genuinely 'settling' right now (its own task still
+        # running) apart from one whose task already died without ever
+        # reaching 'completed' (a real gap: recover_on_startup() only
+        # ever ran once, at run_forever()'s own start, so a round stuck
+        # in 'settling' hours into an otherwise-healthy session was never
+        # revisited until the whole process restarted, despite this
+        # engine's own settlement-failure comment promising "the next
+        # recovery sweep").
+        self._settling_round_ids: set[int] = set()
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -118,7 +129,13 @@ class KenoRoundEngine:
     def _spawn_settlement(self, round_id: int) -> None:
         task = asyncio.create_task(self._settle_and_complete(round_id))
         self._settlement_tasks.add(task)
+        self._settling_round_ids.add(round_id)
         task.add_done_callback(self._settlement_tasks.discard)
+
+        def _clear_settling(_task: "asyncio.Task[None]", round_id: int = round_id) -> None:
+            self._settling_round_ids.discard(round_id)
+
+        task.add_done_callback(_clear_settling)
 
     # ------------------------------------------------------------------
     # One full round: create -> bet -> close -> draw -> (settle overlaps
@@ -126,6 +143,7 @@ class KenoRoundEngine:
     # ------------------------------------------------------------------
 
     async def _run_one_round(self) -> None:
+        await self._recover_stuck_settling_rounds()
         ctx = await self._create_round()
         await self._open_betting(ctx)
         reached_close = await self._run_betting_phase(ctx)
@@ -325,14 +343,16 @@ class KenoRoundEngine:
             logger.exception("keno_settlement_failed", round_id=round_id)
             metrics.keno_settlement_errors_total.inc()
             # Deliberately not re-raised: this runs detached from the
-            # main loop. A round stuck in 'settling' past
-            # STUCK_ROUND_THRESHOLD_SECONDS is caught and refunded by the
-            # next recovery sweep (recover_on_startup /
-            # services/engine/keno_worker.py's periodic call) -- money is
-            # never silently lost, just recovered on the next pass.
+            # main loop. A round stuck in 'settling' -- at any age, never
+            # refunded, see recover_on_startup()'s own comment on why --
+            # is retried by the next recovery sweep: recover_on_startup()
+            # at process boot, or _recover_stuck_settling_rounds() once
+            # per round cycle the rest of the time (services/engine/
+            # keno_worker.py is this engine's real, now-wired-up
+            # production entrypoint). Money is never silently lost, just
+            # recovered on the next pass.
 
     async def _settle_tickets(self, round_id: int, drawn_numbers: list[int]) -> tuple[Decimal, bool]:
-        total_payout = Decimal(0)
         jackpot_hit = False
         async with self._pool.acquire() as conn:
             tickets = await conn.fetch(
@@ -354,27 +374,47 @@ class KenoRoundEngine:
             assert tier is not None
             max_win_per_ticket = Decimal(tier["max_win_per_ticket"])
 
-        for ticket in tickets:
-            picks = frozenset(selections_by_ticket.get(ticket["id"], []))
-            matches = keno.count_matches(picks, drawn_numbers)
-            multipliers = keno_config.paytable_multipliers(ticket)
-            payout = keno.compute_payout(Decimal(ticket["stake"]), matches, multipliers, max_win_per_ticket=max_win_per_ticket)
+        # Spec 6.2: "Settle in batched transactions -- no N+1." One
+        # transaction for the whole round's tickets, not one per ticket
+        # (a real gap this session's own spec-compliance audit caught).
+        # Every ticket's own idempotency key (keno:settle:{round_id}:
+        # {ticket_id}) is still per-ticket and still unique-indexed, so a
+        # crash mid-batch and a retry pass are exactly as safe as before
+        # -- already-settled tickets are simply skipped by the WHERE
+        # status = 'pending' filter above on the next attempt. WS/balance
+        # -update publishes move to after the transaction commits (below)
+        # rather than firing per-ticket mid-loop, so every player in a
+        # round learns their result at the same moment, not staggered by
+        # this loop's own iteration order.
+        to_publish: list[tuple[int, int, int, Decimal, Decimal]] = []  # (user_id, ticket_id, matches, payout, jackpot_payout)
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for ticket in tickets:
+                    picks = frozenset(selections_by_ticket.get(ticket["id"], []))
+                    matches = keno.count_matches(picks, drawn_numbers)
+                    multipliers = keno_config.paytable_multipliers(ticket)
+                    payout = keno.compute_payout(
+                        Decimal(ticket["stake"]), matches, multipliers, max_win_per_ticket=max_win_per_ticket
+                    )
 
-            is_jackpot = ticket["pick_count"] == 5 and matches == 5
-            jackpot_payout = Decimal(0)
-            async with self._pool.acquire() as conn:
-                async with conn.transaction():
+                    is_jackpot = ticket["pick_count"] == 5 and matches == 5
+                    jackpot_payout = Decimal(0)
                     settled = await self._settle_one_ticket(
                         conn, ticket_id=ticket["id"], round_id=round_id, user_id=ticket["user_id"],
                         matches=matches, payout=payout,
                     )
                     if is_jackpot:
-                        jackpot_payout = await self._pay_jackpot(conn, round_id=round_id, ticket_id=ticket["id"], user_id=ticket["user_id"])
+                        jackpot_payout = await self._pay_jackpot(
+                            conn, round_id=round_id, ticket_id=ticket["id"], user_id=ticket["user_id"]
+                        )
                         if jackpot_payout > 0:
                             jackpot_hit = True
-            if settled:
-                _publish_private_ticket_settled(self._redis, ticket["user_id"], round_id, ticket["id"], matches, payout, jackpot_payout)
-                await ledger.publish_balance_update(self._pool, self._redis, ticket["user_id"])
+                    if settled:
+                        to_publish.append((ticket["user_id"], ticket["id"], matches, payout, jackpot_payout))
+
+        for user_id, ticket_id, matches, payout, jackpot_payout in to_publish:
+            _publish_private_ticket_settled(self._redis, user_id, round_id, ticket_id, matches, payout, jackpot_payout)
+            await ledger.publish_balance_update(self._pool, self._redis, user_id)
 
         # Computed from persisted ticket rows across the WHOLE round, not
         # accumulated only from tickets this particular pass touched --
@@ -466,6 +506,20 @@ class KenoRoundEngine:
                 "FROM keno_rounds WHERE status NOT IN ('completed', 'failed', 'voided')"
             )
         for row in stuck_rows:
+            # 'settling' is exempt from the age-based fail+refund path
+            # regardless of how long it's been stuck: spec 5.3 is
+            # explicit -- "Crashed in SETTLING -> re-run; idempotency
+            # keys make paid tickets no-ops" -- never "refund if it's
+            # been too long." The draw is already deterministically
+            # persisted and immutable by this point; refunding instead of
+            # re-settling would hand every ticket its stake back
+            # regardless of whether it actually won, which is wrong for
+            # any ticket that did (a real bug this pass caught while
+            # wiring up the periodic settling-recovery sweep below).
+            if row["status"] == "settling":
+                await self._resume_round(row)
+                recovered.append(row["id"])
+                continue
             age_seconds = await self._round_age_seconds(row)
             if age_seconds > STUCK_ROUND_THRESHOLD_SECONDS:
                 await self._fail_and_refund_round(row["id"], reason="stuck_round_recovery")
@@ -474,6 +528,42 @@ class KenoRoundEngine:
             await self._resume_round(row)
             recovered.append(row["id"])
         return recovered
+
+    async def _recover_stuck_settling_rounds(self) -> None:
+        """Called once per round cycle from _run_one_round() (below), not
+        just at process boot -- recover_on_startup() alone only ever runs
+        once, at run_forever()'s own start, so a round whose detached
+        _settle_and_complete() task died mid-flight (any exception --
+        that method's own try/except logs and swallows it, by design,
+        since it must never take down the main round loop) would
+        otherwise sit in 'settling' until the whole process restarted,
+        despite _settle_and_complete()'s own comment promising "the next
+        recovery sweep." Settlement is always safe to retry regardless of
+        age (spec 5.3: "Crashed in SETTLING -> re-run; idempotency keys
+        make paid tickets no-ops") -- unlike recover_on_startup()'s other
+        branches, this never fails+refunds a settling round.
+
+        Scoped to 'settling' specifically, not a general re-run of
+        recover_on_startup(): every OTHER non-terminal status is always
+        being actively, synchronously driven by this same engine's one
+        currently-executing _run_one_round() call (there is never more
+        than one in flight at a time), so re-resuming those here would
+        race the very call already handling them. 'settling' is the one
+        status that legitimately becomes detached from the main loop
+        (_spawn_settlement() below), which is exactly why
+        self._settling_round_ids exists: a round still in that set has a
+        real in-flight task and must be left alone; one that's fallen out
+        of it while still showing 'settling' in the database is precisely
+        the orphaned case this exists to catch.
+        """
+        async with self._pool.acquire() as conn:
+            stuck_rows = await conn.fetch("SELECT id FROM keno_rounds WHERE status = 'settling'")
+        for row in stuck_rows:
+            round_id = row["id"]
+            if round_id in self._settling_round_ids:
+                continue  # a real in-flight task already owns this one
+            logger.warning("keno_round_settling_recovery_resuming", round_id=round_id)
+            self._spawn_settlement(round_id)
 
     async def _round_age_seconds(self, row: asyncpg.Record) -> float:
         async with self._pool.acquire() as conn:

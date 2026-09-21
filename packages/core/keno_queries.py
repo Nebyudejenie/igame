@@ -132,29 +132,44 @@ def _ticket_row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     }
 
 
+_TERMINAL_ROUND_STATUSES = ("completed", "failed")
+
+
 async def round_detail(pool: asyncpg.Pool, round_id: int) -> dict[str, Any] | None:
-    """Full round result + independent-verification payload -- the
-    server_seed/draw_order aren't sensitive once a round is terminal
-    (the whole point of commit-reveal is that they're meant to be
-    published), mirroring services/admin/queries.py::get_round_fairness()'s
-    own reasoning for Bingo."""
+    """Full round result + independent-verification payload once a round
+    is terminal -- the whole point of commit-reveal is that server_seed
+    is published, but only *after* settlement, never before. server_seed
+    is written to keno_rounds at round CREATION (round_engine.py's own
+    _create_round()), long before betting even closes, so gating this
+    response only on "is the column non-null" (a real bug this session's
+    own spec-compliance audit caught) exposed the live secret seed for a
+    round that hadn't settled yet -- and, separately, drawn_numbers is
+    written in full the instant drawing starts (_run_draw()), well before
+    _reveal_numbers()'s own paced WS stream finishes trickling it out, so
+    the same premature-exposure problem applied to the draw itself, not
+    just the seed. public_seed and server_seed_hash carry no such risk --
+    both are meant to be public from the moment they exist (the hash at
+    round creation; public_seed once betting closes, mirroring
+    _close_betting()'s own "publish immediately" step), so neither is
+    gated here."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM keno_rounds WHERE id = $1", round_id)
         if row is None:
             return None
         ticket_count = await conn.fetchval("SELECT count(*) FROM keno_tickets WHERE round_id = $1", round_id)
 
+    is_terminal = row["status"] in _TERMINAL_ROUND_STATUSES
     verified: bool | None = None
-    if row["status"] in ("completed", "failed") and row["server_seed"] is not None and row["drawn_numbers"] is not None:
+    if is_terminal and row["server_seed"] is not None and row["drawn_numbers"] is not None:
         verified = keno.verify_draw(bytes(row["server_seed"]), row["public_seed"], list(row["drawn_numbers"]))
 
     return {
         "id": row["id"],
         "status": row["status"],
         "server_seed_hash": row["server_seed_hash"],
-        "server_seed": row["server_seed"].hex() if row["server_seed"] is not None else None,
+        "server_seed": row["server_seed"].hex() if is_terminal and row["server_seed"] is not None else None,
         "public_seed": row["public_seed"],
-        "drawn_numbers": list(row["drawn_numbers"]) if row["drawn_numbers"] is not None else None,
+        "drawn_numbers": list(row["drawn_numbers"]) if is_terminal and row["drawn_numbers"] is not None else None,
         "verified": verified,
         "total_stake": str(row["total_stake"]),
         "total_payout": str(row["total_payout"]),

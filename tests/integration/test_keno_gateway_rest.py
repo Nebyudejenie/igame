@@ -198,6 +198,43 @@ async def test_round_detail_endpoint_exposes_verification_payload_once_terminal(
     assert bytes.fromhex(body["server_seed"]) == server_seed
 
 
+async def test_round_detail_hides_server_seed_and_draw_before_the_round_is_terminal(gateway_server, pool, conn):
+    """A spec-compliance audit caught this as a real commit-reveal leak:
+    server_seed is written to keno_rounds at round CREATION (long before
+    settlement), and drawn_numbers is written in full the instant drawing
+    starts (well before the paced WS reveal finishes) -- gating this
+    response on "is the column non-null" (the old bug) exposed both
+    early. This seeds a round in an explicitly non-terminal status
+    ('drawing') with both columns already populated -- exactly the real
+    window the bug was reachable in -- and asserts round_detail() hides
+    them anyway, while server_seed_hash and public_seed (never secret)
+    still come through."""
+    round_id = await _seed_open_round(conn)
+    server_seed = keno.generate_server_seed()
+    public_seed = "gw-test-non-terminal-public-seed"
+    drawn = keno.derive_keno_draw(server_seed, public_seed)
+    await conn.execute(
+        "UPDATE keno_rounds SET status = 'drawing', server_seed = $2, public_seed = $3, drawn_numbers = $4, "
+        "draw_started_at = now() WHERE id = $1",
+        round_id, server_seed, public_seed, drawn,
+    )
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{http_base(gateway_server)}/api/keno/rounds/{round_id}", headers={"Authorization": f"tma {init_data}"}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "drawing"
+    assert body["server_seed"] is None
+    assert body["drawn_numbers"] is None
+    assert body["verified"] is None
+    # Never secret, so still exposed even mid-round.
+    assert body["public_seed"] == public_seed
+    assert body["server_seed_hash"] is not None
+
+
 async def test_round_detail_404_for_unknown_round(gateway_server, pool, conn):
     telegram_id = next_telegram_id()
     init_data = build_init_data(telegram_id)

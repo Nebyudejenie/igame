@@ -82,27 +82,108 @@ DECISIONS.md):
   today. This is Part 3.3's own "mandatory" per-user daily/loss limit,
   not just a Part 14 nice-to-have — it's also the literal top item Part
   14 needs to close before real money.
-- Two internal (non-UI, non-doc) "provably-fair" wording lapses found:
-  `web/miniapp/js/keno.js:577`'s comment and
-  `tests/integration/test_keno_miniapp_e2e.py:201`'s comment. Player
-  -facing UI strings (`locales/*.json`'s `fairness.*` keys) are already
-  correctly worded ("verifiable commit-reveal," never "certified" or
-  "provably fair") — no UI fix needed, only these two comments plus
-  commit-message discipline going forward.
+- ~~Two internal "provably-fair" wording lapses~~ **fixed same day** —
+  see below.
 
-**Next step:** operator to choose sequencing for the (large) "missing
-Part 7 items" list above before Part 14 starts — see the
-in-conversation report for the proposed priority order (wire the engine
-into a real process + fix the server_seed leak first, as the two
-items with no real design decision attached; the rest — reserve
-deposit/withdraw, tier automation, circuit breaker, standard profile,
-risk-of-ruin simulator — need the operator's own input on shape/values
-before building). Also still open: confirming production's actual
-deploy source (no SSH access to the production host from this
-environment — see DECISIONS.md's same-day entry for the circumstantial
-case that it's `github.com/Nebyudejenie/game`, not yet confirmed
-directly).
+**Next step (as of the audit, now superseded by the entry below):**
+operator to choose sequencing for the "missing Part 7 items" list.
+Operator chose: start the three no-decision items immediately, come back
+for the design-heavy ones after.
+
+---
+
+## 2026-09-21 (later same day) — The three no-decision Part 7 items closed; UX research delivered; operator paused deploy-source work
+
+**Done, all proven live against the real dev database, not just by
+test** (full detail + every code citation in DECISIONS.md's own entry
+right below the audit one):
+- `server_seed`/`drawn_numbers` no longer leak pre-settlement
+  (`round_detail()` now gates both on terminal status). New test proves
+  it against a round seeded in `'drawing'` status specifically.
+- Settlement batched into one transaction per round (was one per
+  ticket). New test: 5 users, 1 round, all settle together correctly.
+- `services/engine/keno_worker.py` created — the real, previously
+  -missing production entrypoint. **Ran it live** against the dev DB:
+  113 real rounds created and completed, `ledger.reconcile()` clean
+  afterward.
+- That live run caught **two more real bugs**, both fixed and
+  reverified live: (1) `SIGTERM` didn't actually stop the engine (only
+  an outer polling loop), needed `SIGKILL`, left the Redis lock held —
+  fixed, now exits in ~1.4s and releases the lock cleanly; (2)
+  `recover_on_startup()` only ever ran once at boot, so a round orphaned
+  in `'settling'` mid-session (a swallowed exception in its detached
+  settlement task) was never revisited until a full process restart,
+  contradicting that code's own comment — fixed with a periodic sweep
+  scoped specifically to `'settling'` (the only status that can
+  legitimately exist outside the one round the engine is actively,
+  synchronously driving at any moment). Also found and fixed a *third*
+  bug while writing that fix's own tests: the pre-existing age-based
+  recovery path would have refunded an old stuck `'settling'` round
+  instead of retrying it, contradicting spec 5.3's own text and
+  potentially shortchanging a real winner.
+- Two internal "provably fair" wording lapses fixed (`keno.js`, a test
+  comment) to spec 4.3's own "verifiable commit-reveal" language.
+  Player-facing UI strings needed no change — already correct.
+- Full suite reran clean: **1556 passed** (5 more than the prior entry,
+  exactly the new tests above), 2 failed, both reconfirmed as
+  pre-existing full-suite-load flakiness (passed 3/3 in isolation each),
+  unrelated to this work.
+
+**Deep research on international/real-world Keno UX and advanced
+features delivered** (operator asked for this, separately from the Part
+7 work) — full findings relayed in-conversation, not yet written to a
+docs file. Top-prioritized, ranked by player-experience impact vs. build
+cost:
+1. Autoplay with stop-on-win/stop-on-loss conditions + a round counter
+   — the single biggest gap vs. real products; **needs backend**
+   (server-enforced stop conditions, round-queueing).
+2. Overdue-numbers stat + frequency heatmap added to the existing
+   hot/cold screen — cheap, pure frontend.
+3. Variable draw-reveal pacing (fast early, dramatic on the final
+   numbers near a match) + per-match sound stings — pure frontend.
+4. Favorite/saved number sets — frontend + light backend (per-user
+   saved-set storage).
+5. Colorblind-safe state encoding (shape+color, not color alone) for
+   selected/drawn/matched — pure frontend; the board already partly
+   does this (checkmark/star badges), worth auditing against WCAG
+   4.5:1 contrast specifically.
+6. Contextual live paytable (updates inline as numbers are picked,
+   collapses to a modal for the full table) — pure frontend.
+7. Jackpot ticker + "last winner" banner — pure frontend once the
+   backend exposes a jackpot-value/winner-event feed (mostly exists).
+8. Server-enforced loss limits + a reality-check modal with session
+   round-count — **overlaps directly with the still-open
+   `responsible_gaming` gap** from the compliance audit; treat as one
+   piece of work, not two.
+9. Multi-race (buy N future rounds at once) — **needs backend**
+   (round-queueing/ledger changes); bundle with #1, same subsystem.
+10. Provably-fair-verification UI polish (one-click copy of seed/hash,
+    a clear step-by-step reveal) — pure frontend, leverages what's
+    already built.
+
+Niche/skip for now (real but not worth building): Way/Combo ticket
+math, number-pair correlation stats, Cleopatra-style bonus-round
+mechanics.
+
+**Operator's most recent instruction: deprioritize the production
+deploy-source investigation for now** ("not now for deploy") in favor of
+this UX work. That item (DECISIONS.md's earlier same-day entry —
+circumstantial case that `github.com/Nebyudejenie/game` is/was the
+source, not directly confirmed, no SSH access from this environment)
+stays open, untouched, no further action pending.
+
+**Next step**: operator has not yet said which of the 10 prioritized UX
+items to actually build, or whether to return to the remaining
+design-heavy Part 7 items (reserve deposit/withdraw, tier automation,
+circuit breaker, standard paytable profile, risk-of-ruin simulator)
+first. Both are open; ask before starting either at scale, since several
+UX items need backend/economics decisions (autoplay stop-conditions,
+multi-race purchasing, loss-limit enforcement) that shouldn't be built
+blind.
 
 **Keno remains fully kill-switched / unreachable in production** — per
-the top-line finding, this is currently true by construction (nothing
-runs it), not merely by configuration.
+the audit's top-line finding, this was true by construction (nothing
+ran it); it now runs for real in dev via `services/engine/keno_worker.py`,
+but nothing wires that into `docker-compose.prod.yml` yet (deliberately
+— that's Part 18's own staged-deploy work, still gated behind the rest
+of this list).
