@@ -12426,3 +12426,120 @@ payment_agents` this run — passed 3/3 in isolation, a file untouched by
 any of this work). A third file now joins that same "flaky only under
 full concurrent load" list alongside the SMS test and the earlier
 round-engine one — worth a closer look eventually, not urgent now.
+
+## 2026-09-21 (later same day) — Keno responsible-gaming enforcement + autoplay/multi-race, backend complete
+
+Operator design decisions from the UX-research walkthrough: (1) daily
+loss cap combined across Bingo and Keno, not tracked per game; (2)
+autoplay-with-stop-conditions and multi-race are one server-driven
+mechanism, not two, debited per-round rather than escrowed upfront. Both
+approved before any code was written; this entry covers the build.
+
+**Responsible gaming, wired into Keno for the first time** (closes a
+literal spec 3.3 "mandatory" gap the same day's earlier audit found):
+`packages/core/keno_tickets.py::_place_ticket()` now takes the same
+`pg_advisory_xact_lock(user_id)` + `responsible_gaming.check_stake_
+allowed()` gate `round_engine.py::join()` already takes, for the
+identical reason (that function's own comment: without the lock, a
+Bingo join and a Keno bet racing for the same user could both read
+today's net loss before either stake commits). `responsible_gaming.
+today_net_loss()` now sums both games' own stake/payout ledger-
+transaction kinds together (`_STAKE_KINDS`/`_PAYOUT_KINDS`, extensible
+for a future third game) — deliberately excludes both games' refund
+kinds, matching this query's own pre-existing behavior for Bingo (a
+refunded stake was never subtracted back out before this change
+either, not a new inconsistency); includes `keno_jackpot_payout`,
+which has no Bingo equivalent to match precedent against but is a real
+win credited to `user_cash` on its own merits. New `ResponsibleGamingBlock`
+exception carries the real block reason (`self_excluded`/`banned`/
+`cooling_off`/`loss_limit_reached`) as its own `.code`. Proven with a
+genuine cross-game test: a real ledger-posted Bingo loss alone blocks a
+subsequent Keno ticket, and a real Keno loss alone is visible to
+Bingo's own pre-existing `check_stake_allowed()` call — the combination
+is symmetric, not accidentally one-directional.
+
+**A real, pre-existing bug found and fixed along the way**: `keno_tickets
+.py`'s insufficient-balance path raised the bare `TicketRejected` base
+class with a message (`TicketRejected("insufficient_balance")`), which
+only ever set `__str__` — `.code` stayed the generic base-class
+`"ticket_rejected"` fallback, both over HTTP and in this same day's new
+`keno_autoplay.py` stop-reason bookkeeping. The existing test for this
+path had actually locked the bug in as "expected" (`assert exc_info.
+value.code == "ticket_rejected"`). Fixed with a proper `InsufficientBalance`
+subclass; the pre-existing test's own assertion updated to the now-correct
+value; `keno.error.insufficient_balance` added to both locale files
+(the UI had no string for this case before either). Also simplified
+`services/gateway/app.py`'s Keno error-code mapping: every `TicketRejected`
+subclass already carries its own `.code`, making the separate `type ->
+code` dict that used to sit alongside it pure duplication (and the one
+concrete reason `ResponsibleGamingBlock` couldn't fit that dict's shape
+at all — its code varies per instance, not per type) — removed, now
+reads `exc.code` directly.
+
+**Autoplay / multi-race**: `migrations/versions/
+d1f4b7c92a5e_keno_autoplay.py` adds `keno_autoplay_sessions` (one active
+session per user, partial unique index) and a nullable `keno_tickets.
+autoplay_session_id`. `packages/core/keno_autoplay.py` is the whole
+mechanism: `start_session()`/`stop_session()`/`active_session()` for
+the session's own lifecycle, `place_for_active_sessions()` (called from
+`keno_round_engine.py::_open_betting()`, once per round) which places
+exactly one real ticket per active session via the *existing*
+`place_ticket()` — same validation, exposure, tier, and now
+responsible-gaming checks a manual bet gets, nothing duplicated — and
+`record_settlement()` (called from `_settle_tickets()`, once per
+settled ticket) which updates `net_position` and stops the session if
+either win/loss threshold is crossed. A rejection from `place_ticket()`
+(insufficient balance, round capacity, a responsible-gaming block,
+anything) stops the session immediately with `stop_reason = "ticket_
+rejected:<code>"` rather than retrying forever. Three new REST endpoints
+(`POST`/`DELETE`/`GET /api/keno/autoplay`).
+
+Proven at three levels: `keno_autoplay.py`'s own functions called
+directly (13 tests — config validation, session lifecycle, placement
+across multiple rounds, exhaustion, a real rejection stopping the
+session, both stop-on-win and stop-on-loss, and that an already-stopped
+session is left alone by a late-arriving settlement); a real
+`KenoRoundEngine.run_forever()` end to end (a `rounds_total=2` session
+started before the engine ever runs, zero manual ticket-placement calls,
+asserts it places exactly one ticket per round across two different
+real rounds and lands on `exhausted` with the real ledger balance
+matching exactly what the two real draws paid); and 5 real-HTTP tests
+against the 3 new endpoints.
+
+**Two more pre-existing, latent test bugs found and fixed while writing
+this session's own new tests** (not caused by this session's code
+changes, but newly triggered by how much real reserve-funding activity
+this session's own unusually heavy testing — a live worker run for real
+minutes, multiple e2e passes — has pushed the shared dev `keno_reserve`
+balance to, now ~29,000,000+ ETB): `keno_risk_tiers.max_round_exposure_pct`
+is `numeric(5,4)` (max 4 decimal places), but two tests in `test_keno_
+tickets.py` (`test_place_ticket_rejects_when_round_exposure_cap_reached`,
+`test_place_ticket_rejects_when_user_round_share_exceeded`) derived a
+*smaller* pct to hit an absolute-ETB exposure ceiling regardless of the
+shared reserve's real size — a technique that silently breaks once the
+required pct falls below 0.0001, since Postgres rounds it up to that
+floor instead of storing the smaller value, inflating the real ceiling
+1,500-3,000x past what either test's hardcoded stake was ever chosen to
+clear. Both now use a fixed, safely-representable pct and derive the
+stake actually needed to exceed the real resulting ceiling from the
+*exact* production formula (`estimate_percentile_exposure`'s own
+`expected + Z*sqrt(variance)`, which scales linearly in stake for a
+fixed pick count/paytable — solved in closed form via a new
+`_min_stake_to_exceed_exposure()` test helper, not approximated), so
+neither is fragile to how large the shared reserve happens to be by the
+time it runs, this session or any future one.
+
+**Verification**: mypy clean; full affected surface (Keno tickets/
+gateway/admin/round-engine/autoplay + both responsible-gaming test
+files + Keno unit tests) — **150 passed**, rerun clean multiple times;
+the real-browser Keno e2e test still passes unchanged. Migration's
+up/down both verified against the real dev database.
+
+**Not yet built**: the Mini App frontend for autoplay (setup panel, live
+session status, MainButton-as-stop) — backend-complete, UI still
+pending. Also still pending from the original UX research: overdue
+-numbers/frequency heatmap, variable draw-reveal pacing, favorite/saved
+number sets, colorblind-safe state encoding audit, contextual live
+paytable, jackpot ticker, and fairness-verification UI polish — none of
+these need a backend decision, unlike autoplay/multi-race and loss
+limits did.

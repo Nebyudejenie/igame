@@ -298,9 +298,26 @@ async def check_stake_allowed(conn: AsyncpgConnection, user_id: int, stake: Deci
     return PlayBlock(False, None)
 
 
+# Every game's own stake/payout ledger-transaction kinds -- one combined
+# daily loss cap across the whole platform, not a per-game one (operator
+# decision, 2026-09-21: a player down 500 on Bingo and 500 on Keno has
+# genuinely lost 1,000 today, not two separate 500s that don't count
+# against each other). A future third game adds its own two kinds here,
+# not a second copy of today_net_loss()'s own query. Deliberately
+# excludes both games' own refund kinds ("refund", "keno_refund") --
+# matches this query's own pre-existing behavior for Bingo (a refunded
+# stake was never subtracted back out before this change either), not a
+# new inconsistency introduced here. keno_jackpot_payout has no Bingo
+# equivalent to match precedent against; included on its own merits --
+# a real win credited to user_cash, same as an ordinary payout.
+_STAKE_KINDS = ("stake", "keno_stake")
+_PAYOUT_KINDS = ("payout", "keno_payout", "keno_jackpot_payout")
+
+
 async def today_net_loss(conn: AsyncpgConnection, user_id: int) -> Decimal:
     """Stakes debited from user_cash today minus payouts credited to it
-    today -- a positive number means the player is net down for the day.
+    today, across every game -- a positive number means the player is net
+    down for the day.
 
     "Today" means the Ethiopian calendar day, not the Postgres session's
     ambient (UTC-by-default) one -- a bare `date_trunc('day', now())`
@@ -311,15 +328,17 @@ async def today_net_loss(conn: AsyncpgConnection, user_id: int) -> Decimal:
     row = await conn.fetchrow(
         """
         SELECT
-            COALESCE(SUM(-e.amount) FILTER (WHERE t.kind = 'stake'), 0) AS staked,
-            COALESCE(SUM(e.amount) FILTER (WHERE t.kind = 'payout'), 0) AS won
+            COALESCE(SUM(-e.amount) FILTER (WHERE t.kind = ANY($2)), 0) AS staked,
+            COALESCE(SUM(e.amount) FILTER (WHERE t.kind = ANY($3)), 0) AS won
         FROM ledger_entries e
         JOIN accounts a ON a.id = e.account_id
         JOIN ledger_transactions t ON t.id = e.transaction_id
-        WHERE a.user_id = $1 AND a.kind = 'user_cash' AND t.kind IN ('stake', 'payout')
+        WHERE a.user_id = $1 AND a.kind = 'user_cash' AND t.kind = ANY($2 || $3)
           AND e.created_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa'
         """,
         user_id,
+        list(_STAKE_KINDS),
+        list(_PAYOUT_KINDS),
     )
     assert row is not None
     staked: Decimal = row["staked"]

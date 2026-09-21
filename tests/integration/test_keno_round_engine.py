@@ -16,7 +16,7 @@ from decimal import Decimal
 import asyncpg
 import pytest
 
-from packages.core import keno, ledger
+from packages.core import keno, keno_autoplay, ledger
 from services.engine.keno_lock import LOCK_KEY as KENO_LOCK_KEY
 from services.engine.keno_round_engine import KenoRoundEngine
 from tests.integration.conftest import create_funded_user
@@ -110,12 +110,21 @@ async def _clean_keno_lock_and_rounds(pool: asyncpg.Pool, redis):
     (a failure, a timeout) would otherwise make every subsequent test's
     run_forever() fail to acquire it and hang waiting for a round that
     never appears. Also closes any dangling betting_open round, same
-    reasoning as test_keno_tickets.py's own autouse fixture."""
+    reasoning as test_keno_tickets.py's own autouse fixture. Also stops
+    any dangling active autoplay session -- place_for_active_sessions()
+    operates on every active session platform-wide, so a session an
+    earlier test left active would otherwise get a real, unexpected
+    ticket placed into a later test's own round the moment its engine
+    opens betting."""
 
     async def _clean() -> None:
         await redis.delete(KENO_LOCK_KEY)
         async with pool.acquire() as conn:
             await conn.execute("UPDATE keno_rounds SET status = 'completed' WHERE status NOT IN ('completed', 'failed', 'voided')")
+            await conn.execute(
+                "UPDATE keno_autoplay_sessions SET status = 'stopped', stop_reason = 'test_cleanup', updated_at = now() "
+                "WHERE status = 'active'"
+            )
 
     await _clean()
     yield
@@ -508,3 +517,62 @@ async def test_periodic_sweep_leaves_a_genuinely_in_flight_settling_round_alone(
         ticket_row = await conn.fetchrow("SELECT status FROM keno_tickets WHERE id = $1", ticket_id)
     assert round_row["status"] == "settling"
     assert ticket_row["status"] == "pending"
+
+
+async def test_autoplay_session_places_real_tickets_across_real_rounds_and_exhausts(
+    pool: asyncpg.Pool, redis
+) -> None:
+    """The full wiring, end to end, against a real running engine --
+    not just packages/core/keno_autoplay.py's own functions called
+    directly (see test_keno_autoplay.py for that). A rounds_total=2
+    session started *before* the engine ever runs must, with zero manual
+    ticket-placement calls, place exactly one real ticket per round
+    across two real consecutive rounds and land on 'exhausted' -- proving
+    keno_round_engine.py's own _open_betting()/_settle_tickets() hooks
+    (place_for_active_sessions/record_settlement) actually fire from the
+    real round lifecycle, not just from a test calling them by hand."""
+    async with pool.acquire() as conn:
+        await _seed_fast_config_and_tier(conn, betting_seconds=1, draw_seconds=1, result_seconds=1)
+        user_id = await create_funded_user(conn, Decimal("1000.00"))
+    session = await keno_autoplay.start_session(pool, user_id=user_id, picks=[7], stake=Decimal("10"), rounds_total=2)
+
+    engine = KenoRoundEngine(pool, redis)
+    engine_task = asyncio.create_task(engine.run_forever())
+    try:
+        async def _session_is_exhausted() -> bool:
+            refreshed = await pool.fetchrow("SELECT status FROM keno_autoplay_sessions WHERE id = $1", session.id)
+            return refreshed is not None and refreshed["status"] == "exhausted"
+
+        await _wait_until(_session_is_exhausted, timeout=25.0)
+    finally:
+        engine.stop()
+        await asyncio.wait_for(engine_task, timeout=15.0)
+
+    async with pool.acquire() as conn:
+        session_row = await conn.fetchrow(
+            "SELECT status, stop_reason, rounds_placed FROM keno_autoplay_sessions WHERE id = $1", session.id
+        )
+        tickets = await conn.fetch(
+            "SELECT round_id, status, stake, autoplay_session_id FROM keno_tickets WHERE autoplay_session_id = $1 "
+            "ORDER BY id",
+            session.id,
+        )
+    assert session_row["status"] == "exhausted"
+    assert session_row["stop_reason"] == "rounds_exhausted"
+    assert session_row["rounds_placed"] == 2
+    assert len(tickets) == 2
+    assert tickets[0]["round_id"] != tickets[1]["round_id"]  # two different real rounds, not the same one twice
+    for ticket in tickets:
+        assert ticket["stake"] == Decimal("10.00")
+        assert ticket["status"] in ("won", "lost")  # both real rounds ran their full lifecycle to settlement
+
+    balance = await ledger.user_balance_snapshot(pool, user_id)
+    async with pool.acquire() as conn:
+        payout_rows = await conn.fetch(
+            "SELECT payout FROM keno_tickets WHERE autoplay_session_id = $1", session.id
+        )
+    total_payout = sum((Decimal(r["payout"]) for r in payout_rows), start=Decimal(0))
+    # Started at 1000, staked 10 twice (20 total), got back whatever the
+    # two real draws actually paid -- a real, independently-checkable
+    # ledger balance, not just "no exception was raised."
+    assert Decimal(balance["cash"]) == Decimal("1000.00") - Decimal("20.00") + total_payout

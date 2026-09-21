@@ -243,3 +243,102 @@ async def test_round_detail_404_for_unknown_round(gateway_server, pool, conn):
             f"{http_base(gateway_server)}/api/keno/rounds/99999999", headers={"Authorization": f"tma {init_data}"}
         )
     assert response.status_code == 404
+
+
+# --- autoplay / multi-race (2026-09-21) ------------------------------------
+
+
+async def _real_user_headers(gateway_server, pool):
+    """A genuine authenticated user via the same lazy get_or_create path
+    /api/me itself uses (no /start with the bot yet) -- returns headers
+    ready for any other request, and the user's own real id."""
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    return {"Authorization": f"tma {init_data}"}, user_id
+
+
+async def test_start_autoplay_over_http_creates_a_real_session(gateway_server, pool):
+    headers, user_id = await _real_user_headers(gateway_server, pool)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/autoplay",
+            headers=headers,
+            json={"picks": [1, 2], "stake": "10", "rounds_total": 5},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["picks"] == [1, 2]
+    assert body["stake"] == "10.00"
+    assert body["rounds_total"] == 5
+    assert body["status"] == "active"
+
+    row = await pool.fetchrow("SELECT user_id, status FROM keno_autoplay_sessions WHERE id = $1", body["id"])
+    assert row["user_id"] == user_id
+    assert row["status"] == "active"
+
+
+async def test_start_autoplay_rejects_a_config_with_no_stop_condition(gateway_server, pool):
+    headers, _ = await _real_user_headers(gateway_server, pool)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/autoplay",
+            headers=headers,
+            json={"picks": [1], "stake": "10"},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid_autoplay_config"
+
+
+async def test_start_autoplay_rejects_a_second_active_session_over_http(gateway_server, pool):
+    headers, _ = await _real_user_headers(gateway_server, pool)
+    async with httpx.AsyncClient() as client:
+        first = await client.post(
+            f"{http_base(gateway_server)}/api/keno/autoplay",
+            headers=headers, json={"picks": [1], "stake": "10", "rounds_total": 5},
+        )
+        assert first.status_code == 200
+        second = await client.post(
+            f"{http_base(gateway_server)}/api/keno/autoplay",
+            headers=headers, json={"picks": [2], "stake": "20", "rounds_total": 3},
+        )
+    assert second.status_code == 422
+    assert second.json()["detail"] == "autoplay_session_already_active"
+
+
+async def test_get_autoplay_returns_null_when_nothing_is_active(gateway_server, pool):
+    headers, _ = await _real_user_headers(gateway_server, pool)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{http_base(gateway_server)}/api/keno/autoplay", headers=headers)
+    assert response.status_code == 200
+    assert response.json() is None
+
+
+async def test_get_and_stop_autoplay_over_http(gateway_server, pool):
+    headers, _ = await _real_user_headers(gateway_server, pool)
+    async with httpx.AsyncClient() as client:
+        started = await client.post(
+            f"{http_base(gateway_server)}/api/keno/autoplay",
+            headers=headers, json={"picks": [1], "stake": "10", "stop_on_win_amount": "500"},
+        )
+        assert started.status_code == 200
+
+        fetched = await client.get(f"{http_base(gateway_server)}/api/keno/autoplay", headers=headers)
+        assert fetched.status_code == 200
+        assert fetched.json()["id"] == started.json()["id"]
+        assert fetched.json()["stop_on_win_amount"] == "500.00"
+
+        stopped = await client.delete(f"{http_base(gateway_server)}/api/keno/autoplay", headers=headers)
+        assert stopped.status_code == 200
+        assert stopped.json() == {"stopped": True}
+
+        # A second stop is an idempotent no-op, not an error.
+        stopped_again = await client.delete(f"{http_base(gateway_server)}/api/keno/autoplay", headers=headers)
+        assert stopped_again.status_code == 200
+        assert stopped_again.json() == {"stopped": False}
+
+        after = await client.get(f"{http_base(gateway_server)}/api/keno/autoplay", headers=headers)
+        assert after.status_code == 200
+        assert after.json() is None

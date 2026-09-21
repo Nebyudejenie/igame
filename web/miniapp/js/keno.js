@@ -255,7 +255,10 @@ const ERROR_KEYS = new Set([
   "keno_disabled", "round_not_accepting_bets", "invalid_picks", "stake_not_allowed",
   "pick_count_not_allowed_at_tier", "too_many_tickets_this_round", "round_capacity_reached",
   "user_round_share_exceeded", "simulated_player", "rate_limited", "invalid_stake",
-  "missing_idempotency_key",
+  "missing_idempotency_key", "insufficient_balance",
+  // packages/core/responsible_gaming.py's own PlayBlock.reason values,
+  // now checked on every Keno bet too (2026-09-21).
+  "self_excluded", "banned", "cooling_off", "loss_limit_reached",
 ]);
 
 function setPlayStatus(key, kind) {

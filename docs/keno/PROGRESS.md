@@ -187,3 +187,53 @@ ran it); it now runs for real in dev via `services/engine/keno_worker.py`,
 but nothing wires that into `docker-compose.prod.yml` yet (deliberately
 — that's Part 18's own staged-deploy work, still gated behind the rest
 of this list).
+
+---
+
+## 2026-09-21 (later still) — Responsible gaming + autoplay/multi-race: backend done, UI not started
+
+Operator answered the UX-scope question from the entry above: walk
+through the backend/economics decisions for autoplay/multi-race and
+loss limits *before* any UI work, build it in one pass once decided.
+Decisions made and approved: daily loss cap combined across Bingo+Keno
+(not per-game); autoplay-with-stop-conditions and multi-race are one
+mechanism (`keno_autoplay_sessions`), debited per-round, not escrowed
+upfront. Full detail + every citation in DECISIONS.md's own entry
+directly below the Part 7 audit one.
+
+**Done, all proven with real tests against the real dev database:**
+- `keno_tickets.py::_place_ticket()` now checks `responsible_gaming.
+  check_stake_allowed()` (closes the spec 3.3 gap the same day's earlier
+  audit found) — same advisory-lock pattern `round_engine.py::join()`
+  already uses, for the same cross-game-race reason.
+  `today_net_loss()` now sums both games' stake/payout kinds together.
+- `packages/core/keno_autoplay.py` — the full autoplay/multi-race
+  mechanism, wired into `keno_round_engine.py`'s own `_open_betting()`/
+  `_settle_tickets()`. Three new REST endpoints (`POST`/`DELETE`/
+  `GET /api/keno/autoplay`).
+- Two real, pre-existing bugs found and fixed along the way (not
+  regressions from this work, but newly triggered by it): an
+  insufficient-balance rejection had never actually carried its own
+  error code (silently fell back to the generic one, both over HTTP and
+  now in autoplay's own stop-reason bookkeeping) since the exception
+  that raises it was never given a proper `.code`; and two *other*,
+  older exposure-cap tests turned out to be silently broken by this
+  session's own unusually heavy dev-database usage (a `numeric(5,4)`
+  column precision floor these tests' own pct-derivation technique
+  didn't account for) — found because my own new tests share the same
+  shared reserve account and needed the identical fix to pass reliably.
+- 150 tests passing across the full affected surface (Keno tickets/
+  gateway/admin/round-engine/autoplay, both responsible-gaming files,
+  Keno unit tests), mypy clean, the real-browser Keno e2e test
+  unaffected. Migration up/down both verified live.
+
+**Next step**: the Mini App frontend for autoplay (setup panel, live
+session status display, MainButton-as-stop) — nothing built yet, backend
+is ready and fully tested underneath it. After that: the remaining
+pure-frontend UX items from the original research (overdue-numbers/
+frequency heatmap, variable draw-reveal pacing + sound, favorite/saved
+number sets, a colorblind-safe-encoding audit, contextual live paytable,
+jackpot ticker, fairness-verification UI polish) — none of these need
+another backend decision. The design-heavy Part 7 items (reserve
+deposit/withdraw, tier automation, circuit breaker, standard paytable
+profile, risk-of-ruin simulator) are still fully open and untouched.

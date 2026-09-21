@@ -23,7 +23,7 @@ from decimal import Decimal
 import asyncpg
 import structlog
 
-from packages.core import keno, keno_config, keno_exposure, ledger, metrics
+from packages.core import keno, keno_config, keno_exposure, ledger, metrics, responsible_gaming
 
 logger = structlog.get_logger()
 
@@ -77,6 +77,10 @@ class UnknownUser(TicketRejected):
     code = "unknown_user"
 
 
+class InsufficientBalance(TicketRejected):
+    code = "insufficient_balance"
+
+
 class SimulatedPlayerCannotPlaceKenoTicket(TicketRejected):
     """Same defense-in-depth as services/payments/withdrawals.py's
     SimulatedPlayerCannotWithdraw -- a house-float-funded simulated
@@ -85,7 +89,26 @@ class SimulatedPlayerCannotPlaceKenoTicket(TicketRejected):
     the check costs nothing and closes the door structurally rather than
     by omission."""
 
-    code = "simulated_player_cannot_place_ticket"
+    # Matches web/miniapp/js/keno.js's own ERROR_KEYS set and the
+    # keno.error.simulated_player i18n key exactly -- the gateway used to
+    # map this one exception type to this shorter string via a separate
+    # dict (services/gateway/app.py's own now-removed
+    # _KENO_TICKET_ERROR_CODES); reading .code directly off the instance
+    # now, so the two need to agree here instead.
+    code = "simulated_player"
+
+
+class ResponsibleGamingBlock(TicketRejected):
+    """packages/core/responsible_gaming.py's own PlayBlock.reason, one
+    of 'self_excluded' | 'banned' | 'cooling_off' | 'loss_limit_reached'
+    -- a spec-compliance audit (2026-09-21) found Keno never checked this
+    at all, unlike Bingo's round_engine.py::join(). The daily loss cap
+    this feeds is combined across both games (today_net_loss() sums both
+    games' own stake/payout kinds together), not tracked separately."""
+
+    def __init__(self, reason: str) -> None:
+        self.code = reason
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -107,6 +130,7 @@ async def place_ticket(
     picks: list[int],
     stake: Decimal,
     idempotency_key: str,
+    autoplay_session_id: int | None = None,
 ) -> PlacedTicket:
     """Public entry point: delegates to _place_ticket, incrementing
     keno_bet_rejections_total{reason} on any typed rejection (Part 16)
@@ -114,7 +138,8 @@ async def place_ticket(
     every individual raise site in _place_ticket below."""
     try:
         return await _place_ticket(
-            pool, redis, user_id=user_id, picks=picks, stake=stake, idempotency_key=idempotency_key
+            pool, redis, user_id=user_id, picks=picks, stake=stake, idempotency_key=idempotency_key,
+            autoplay_session_id=autoplay_session_id,
         )
     except TicketRejected as exc:
         metrics.keno_bet_rejections_total.labels(reason=exc.code).inc()
@@ -129,6 +154,7 @@ async def _place_ticket(
     picks: list[int],
     stake: Decimal,
     idempotency_key: str,
+    autoplay_session_id: int | None = None,
 ) -> PlacedTicket:
     """Part 6.1's bet-placement transaction, in full:
 
@@ -183,6 +209,22 @@ async def _place_ticket(
                 raise UnknownUser(str(user_id))
             if user_row["is_simulated"]:
                 raise SimulatedPlayerCannotPlaceKenoTicket(str(user_id))
+
+            # Same pg_advisory_xact_lock(user_id) round_engine.py's own
+            # join() takes, and for the identical reason (its own
+            # comment): without a lock held for this whole transaction,
+            # a Bingo join and a Keno ticket racing for the same user
+            # could both read today's net loss before either stake
+            # commits, letting both pass a daily_loss_cap that either one
+            # alone would have blocked. The lock is keyed only on
+            # user_id, not per-game, so it correctly serializes against
+            # Bingo's own call too -- pg_advisory_xact_lock is global to
+            # the whole Postgres instance, not scoped to a table.
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", user_id)
+            block = await responsible_gaming.check_stake_allowed(conn, user_id, stake)
+            if block.blocked:
+                assert block.reason is not None
+                raise ResponsibleGamingBlock(block.reason)
 
             config = await keno_config.load_active_config(conn)
             if not config["keno_enabled"]:
@@ -282,15 +324,23 @@ async def _place_ticket(
                     created_by="keno_tickets.place_ticket",
                 )
             except ledger.InsufficientFunds as exc:
-                raise TicketRejected("insufficient_balance") from exc
+                # Pre-existing bug this pass caught (not introduced by
+                # it): raising the bare TicketRejected base class with a
+                # message only ever set __str__, never .code -- every
+                # caller reading exc.code (services/gateway/app.py's own
+                # HTTPException(detail=exc.code), and now
+                # keno_autoplay.place_for_active_sessions()'s stop_reason)
+                # got the generic "ticket_rejected" fallback instead of
+                # this specific, more useful reason.
+                raise InsufficientBalance() from exc
 
             ticket_id = await conn.fetchval(
                 """
                 INSERT INTO keno_tickets
                     (round_id, user_id, paytable_id, pick_count, stake,
                      expected_payout_contribution, payout_variance_contribution,
-                     status, idempotency_key, stake_txn_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9)
+                     status, idempotency_key, stake_txn_id, autoplay_session_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10)
                 RETURNING id
                 """,
                 round_id,
@@ -302,6 +352,7 @@ async def _place_ticket(
                 ticket_risk.payout_variance,
                 idempotency_key,
                 stake_txn.id,
+                autoplay_session_id,
             )
             await conn.executemany(
                 "INSERT INTO keno_ticket_selections (ticket_id, number) VALUES ($1, $2)",

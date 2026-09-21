@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
-from packages.core import keno_queries, keno_tickets, rate_limit, telegram_auth
+from packages.core import keno_autoplay, keno_queries, keno_tickets, rate_limit, telegram_auth
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.ledger import user_balance_snapshot
@@ -450,20 +450,15 @@ async def api_create_withdrawal(
 
 # --- Keno (build spec Part 10) --------------------------------------------
 #
-# Every KenoTicketRejected subclass maps to a short error code, the same
-# "distinct exception type, never a raw 500" pattern used above for
-# deposits/withdrawals.
-_KENO_TICKET_ERROR_CODES: dict[type[Exception], str] = {
-    keno_tickets.KenoDisabled: "keno_disabled",
-    keno_tickets.RoundNotAcceptingBets: "round_not_accepting_bets",
-    keno_tickets.InvalidPicks: "invalid_picks",
-    keno_tickets.StakeNotAllowed: "stake_not_allowed",
-    keno_tickets.PickCountNotAllowedAtTier: "pick_count_not_allowed_at_tier",
-    keno_tickets.TooManyTicketsThisRound: "too_many_tickets_this_round",
-    keno_tickets.RoundCapacityReached: "round_capacity_reached",
-    keno_tickets.UserRoundShareExceeded: "user_round_share_exceeded",
-    keno_tickets.SimulatedPlayerCannotPlaceKenoTicket: "simulated_player",
-}
+# Every TicketRejected subclass already carries its own .code (set as a
+# class attribute on each subclass in packages/core/keno_tickets.py, with
+# TicketRejected's own "ticket_rejected" as the base-class fallback) --
+# reading it straight off the instance below, rather than a second,
+# parallel type->code dict here, is what actually lets
+# ResponsibleGamingBlock work: its code varies per instance (whichever of
+# 'self_excluded' | 'banned' | 'cooling_off' | 'loss_limit_reached'
+# responsible_gaming.check_stake_allowed() returned), which a dict keyed
+# on exception *type* can't represent at all.
 
 
 def _client_ip(request: Request) -> str:
@@ -526,8 +521,7 @@ async def api_place_keno_ticket(
             idempotency_key=body.idempotency_key,
         )
     except keno_tickets.TicketRejected as exc:
-        code = _KENO_TICKET_ERROR_CODES.get(type(exc), "ticket_rejected")
-        raise HTTPException(status_code=422, detail=code) from exc
+        raise HTTPException(status_code=422, detail=exc.code) from exc
 
     return {
         "id": ticket.id,
@@ -536,6 +530,86 @@ async def api_place_keno_ticket(
         "stake": str(ticket.stake),
         "status": ticket.status,
     }
+
+
+class StartKenoAutoplayRequest(BaseModel):
+    picks: list[int]
+    stake: str
+    rounds_total: int | None = None
+    stop_on_win_amount: str | None = None
+    stop_on_loss_amount: str | None = None
+
+
+def _autoplay_session_to_dict(session: keno_autoplay.AutoplaySession) -> dict[str, Any]:
+    return {
+        "id": session.id,
+        "picks": sorted(session.picks),
+        "stake": str(session.stake),
+        "rounds_total": session.rounds_total,
+        "rounds_placed": session.rounds_placed,
+        "stop_on_win_amount": str(session.stop_on_win_amount) if session.stop_on_win_amount is not None else None,
+        "stop_on_loss_amount": str(session.stop_on_loss_amount) if session.stop_on_loss_amount is not None else None,
+        "net_position": str(session.net_position),
+        "status": session.status,
+        "stop_reason": session.stop_reason,
+        "last_round_id": session.last_round_id,
+    }
+
+
+@app.post("/api/keno/autoplay")
+async def api_start_keno_autoplay(
+    body: StartKenoAutoplayRequest, authorization: str = Header(default="")
+) -> dict[str, Any]:
+    """Starts a new autoplay/multi-race session (build spec-adjacent UX
+    research, 2026-09-21) -- one mechanism covering both "autoplay with
+    stop-on-win/loss" and "buy N future rounds," driven from
+    keno_round_engine.py's own _open_betting(), never from this request
+    itself (this call only ever creates the session row)."""
+    user_id = await _authenticated_user_id(authorization)
+    try:
+        stake = Decimal(body.stake)
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="invalid_stake") from None
+    stop_on_win_amount = None
+    if body.stop_on_win_amount is not None:
+        try:
+            stop_on_win_amount = Decimal(body.stop_on_win_amount)
+        except InvalidOperation:
+            raise HTTPException(status_code=422, detail="invalid_stop_on_win_amount") from None
+    stop_on_loss_amount = None
+    if body.stop_on_loss_amount is not None:
+        try:
+            stop_on_loss_amount = Decimal(body.stop_on_loss_amount)
+        except InvalidOperation:
+            raise HTTPException(status_code=422, detail="invalid_stop_on_loss_amount") from None
+
+    try:
+        session = await keno_autoplay.start_session(
+            app.state.pool,
+            user_id=user_id,
+            picks=body.picks,
+            stake=stake,
+            rounds_total=body.rounds_total,
+            stop_on_win_amount=stop_on_win_amount,
+            stop_on_loss_amount=stop_on_loss_amount,
+        )
+    except keno_autoplay.AutoplayError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from exc
+    return _autoplay_session_to_dict(session)
+
+
+@app.delete("/api/keno/autoplay")
+async def api_stop_keno_autoplay(authorization: str = Header(default="")) -> dict[str, Any]:
+    user_id = await _authenticated_user_id(authorization)
+    session = await keno_autoplay.stop_session(app.state.pool, user_id=user_id)
+    return {"stopped": session is not None}
+
+
+@app.get("/api/keno/autoplay")
+async def api_get_keno_autoplay(authorization: str = Header(default="")) -> dict[str, Any] | None:
+    user_id = await _authenticated_user_id(authorization)
+    session = await keno_autoplay.active_session(app.state.pool, user_id=user_id)
+    return _autoplay_session_to_dict(session) if session is not None else None
 
 
 @app.get("/api/keno/tickets")

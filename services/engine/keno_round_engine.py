@@ -46,7 +46,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import keno, keno_config, keno_exposure, ledger, metrics
+from packages.core import keno, keno_autoplay, keno_config, keno_exposure, ledger, metrics
 from services.engine.keno_lock import KenoRoundLock
 
 logger = structlog.get_logger()
@@ -197,6 +197,7 @@ class KenoRoundEngine:
                 "stake_options": [str(s) for s in ctx.tier["stake_options"]],
             },
         )
+        await keno_autoplay.place_for_active_sessions(self._pool, self._redis, round_id=ctx.id)
 
     async def _run_betting_phase(self, ctx: _RoundContext) -> bool:
         """Sleeps out the betting window, broadcasting periodic ticks and
@@ -356,7 +357,8 @@ class KenoRoundEngine:
         jackpot_hit = False
         async with self._pool.acquire() as conn:
             tickets = await conn.fetch(
-                "SELECT t.id, t.user_id, t.pick_count, t.stake, t.paytable_id, p.multipliers, p.pick_count AS paytable_pick_count "
+                "SELECT t.id, t.user_id, t.pick_count, t.stake, t.paytable_id, t.autoplay_session_id, "
+                "p.multipliers, p.pick_count AS paytable_pick_count "
                 "FROM keno_tickets t JOIN keno_paytables p ON p.id = t.paytable_id "
                 "WHERE t.round_id = $1 AND t.status = 'pending'",
                 round_id,
@@ -386,7 +388,8 @@ class KenoRoundEngine:
         # rather than firing per-ticket mid-loop, so every player in a
         # round learns their result at the same moment, not staggered by
         # this loop's own iteration order.
-        to_publish: list[tuple[int, int, int, Decimal, Decimal]] = []  # (user_id, ticket_id, matches, payout, jackpot_payout)
+        # (user_id, ticket_id, matches, payout, jackpot_payout, stake, autoplay_session_id)
+        to_publish: list[tuple[int, int, int, Decimal, Decimal, Decimal, int | None]] = []
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 for ticket in tickets:
@@ -410,11 +413,18 @@ class KenoRoundEngine:
                         if jackpot_payout > 0:
                             jackpot_hit = True
                     if settled:
-                        to_publish.append((ticket["user_id"], ticket["id"], matches, payout, jackpot_payout))
+                        to_publish.append((
+                            ticket["user_id"], ticket["id"], matches, payout, jackpot_payout,
+                            Decimal(ticket["stake"]), ticket["autoplay_session_id"],
+                        ))
 
-        for user_id, ticket_id, matches, payout, jackpot_payout in to_publish:
+        for user_id, ticket_id, matches, payout, jackpot_payout, stake, autoplay_session_id in to_publish:
             _publish_private_ticket_settled(self._redis, user_id, round_id, ticket_id, matches, payout, jackpot_payout)
             await ledger.publish_balance_update(self._pool, self._redis, user_id)
+            await keno_autoplay.record_settlement(
+                self._pool, autoplay_session_id=autoplay_session_id, stake=stake, payout=payout,
+                jackpot_payout=jackpot_payout,
+            )
 
         # Computed from persisted ticket rows across the WHOLE round, not
         # accumulated only from tickets this particular pass touched --

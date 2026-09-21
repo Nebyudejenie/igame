@@ -14,7 +14,7 @@ from decimal import Decimal
 import asyncpg
 import pytest
 
-from packages.core import keno, keno_tickets, ledger
+from packages.core import keno, keno_exposure, keno_tickets, ledger, responsible_gaming
 from tests.integration.conftest import create_funded_user
 
 # keno_risk_tiers has UNIQUE(tier_number, version) and keno_paytables has
@@ -169,6 +169,42 @@ async def _fund_reserve(conn: asyncpg.Connection, amount: Decimal) -> Decimal:
     return await ledger.balance(conn, reserve.id)
 
 
+def _min_stake_to_exceed_exposure(
+    ceiling: Decimal, *, pick_count: int, multipliers: dict[int, Decimal], safety_factor: Decimal = Decimal("1.5")
+) -> Decimal:
+    """Exact, scale-independent minimum stake whose own
+    estimate_percentile_exposure() would exceed `ceiling` -- computed
+    from the *real* production formula (expected + Z*sqrt(variance)),
+    not a hand-tuned constant.
+
+    Both expected_payout and payout_variance scale with stake (linear,
+    quadratic respectively -- keno_exposure.compute_ticket_risk_
+    contribution()'s own docstring), so per-unit-stake exposure is a
+    single fixed number for a given (pick_count, multipliers) pair;
+    solving stake*(unit_expected + Z*sqrt(unit_variance)) >= ceiling for
+    stake gives an exact answer, not an approximation.
+
+    Exists because two tests in this file (round-exposure-cap and
+    per-user-share) used to hand-pick a max_round_exposure_pct meant to
+    yield a small, known-magnitude ceiling regardless of the shared,
+    ever-growing keno_reserve balance (see _fund_reserve's own
+    docstring) -- but keno_risk_tiers.max_round_exposure_pct is
+    numeric(5,4) (max 4 decimal places), and both tests' own pct
+    derivation needed *more* precision than that once this session's own
+    unusually heavy real-worker/e2e testing pushed the shared reserve
+    balance past ~20,000,000 ETB, silently rounding pct up to the
+    column's minimum representable value (0.0001) and producing a
+    ceiling roughly 1,500-3,000x larger than either test's own hardcoded
+    stake was ever chosen to clear. Both now pick a safely-representable,
+    *fixed* pct instead and derive the stake needed from the real
+    resulting ceiling via this function, so neither is fragile to
+    whatever the shared reserve happens to hold by the time it runs.
+    """
+    unit = keno_exposure.compute_ticket_risk_contribution(pick_count, multipliers, stake=Decimal("1"))
+    per_unit_exposure = unit.expected_payout + keno_exposure.Z_SCORE_99_9 * keno_exposure._decimal_sqrt(unit.payout_variance)
+    return ((ceiling / per_unit_exposure) * safety_factor).quantize(Decimal("0.01"))
+
+
 async def test_place_ticket_debits_stake_and_credits_reserve_and_jackpot(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         round_id = await _seed_keno_round(conn)
@@ -240,11 +276,18 @@ async def test_place_ticket_rejects_insufficient_balance(pool: asyncpg.Pool) -> 
         await _fund_reserve(conn, Decimal("40000"))
         user_id = await create_funded_user(conn, Decimal("5.00"))  # less than the 10 ETB stake
 
-    with pytest.raises(keno_tickets.TicketRejected) as exc_info:
+    with pytest.raises(keno_tickets.InsufficientBalance) as exc_info:
         await keno_tickets.place_ticket(
             pool, redis=object(), user_id=user_id, picks=[1], stake=Decimal("10"), idempotency_key=f"test-{uuid.uuid4()}"
         )
-    assert exc_info.value.code == "ticket_rejected"
+    # A real pre-existing bug this session's own keno_autoplay test
+    # caught: raising the bare TicketRejected base class with a message
+    # only ever set __str__, never .code -- every caller reading
+    # exc.code (services/gateway/app.py's own HTTPException(detail=
+    # exc.code), keno_autoplay.py's own stop_reason) got the generic
+    # "ticket_rejected" fallback instead of this specific, more useful
+    # one. This assertion used to lock the bug in as "expected."
+    assert exc_info.value.code == "insufficient_balance"
 
 
 async def test_place_ticket_rejects_stake_not_in_tier_options(pool: asyncpg.Pool) -> None:
@@ -310,15 +353,21 @@ async def test_place_ticket_rejects_when_round_exposure_cap_reached(pool: asyncp
     async with pool.acquire() as conn:
         # keno_reserve is a persistent, growing shared account across
         # this whole test session (see _fund_reserve's own docstring) --
-        # fund it first, read the REAL resulting balance, then choose a
-        # max_round_exposure_pct that yields a known-tiny ceiling
-        # (~1 ETB) regardless of how much prior tests already
-        # accumulated in it, rather than assuming a fixed percentage
-        # against an assumed-fresh balance.
+        # fund it first, read the REAL resulting balance, then pick a
+        # *fixed*, safely-representable max_round_exposure_pct (the
+        # column is numeric(5,4) -- 0.0001 is its own minimum nonzero
+        # value, deliberately used at exactly that floor rather than
+        # something derived that could silently round up to it) and
+        # derive the stake needed to exceed the real resulting ceiling
+        # via _min_stake_to_exceed_exposure()'s own exact math, rather
+        # than a hand-picked constant that only worked while the shared
+        # reserve stayed small.
         balance = await _fund_reserve(conn, Decimal("100"))
-        tiny_pct = (Decimal("1") / balance).quantize(Decimal("0.000001"))
-        await _seed_keno_round(conn, max_round_exposure_pct=tiny_pct)
-        user_id = await create_funded_user(conn, Decimal("1000.00"))
+        pct = Decimal("0.0001")
+        ceiling = (balance * pct).quantize(Decimal("0.01"))
+        big_stake = _min_stake_to_exceed_exposure(ceiling, pick_count=5, multipliers=_MULTIPLIERS_BY_PICK_COUNT[5])
+        await _seed_keno_round(conn, max_round_exposure_pct=pct, stake_options=[Decimal("10"), big_stake])
+        user_id = await create_funded_user(conn, big_stake * 2)
 
     with pytest.raises(keno_tickets.RoundCapacityReached):
         await keno_tickets.place_ticket(
@@ -326,25 +375,33 @@ async def test_place_ticket_rejects_when_round_exposure_cap_reached(pool: asyncp
             redis=object(),
             user_id=user_id,
             picks=[1, 2, 3, 4, 5],
-            stake=Decimal("50"),
+            stake=big_stake,
             idempotency_key=f"test-{uuid.uuid4()}",
         )
 
 
 async def test_place_ticket_rejects_when_user_round_share_exceeded(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
-        # Same reasoning as the exposure-cap test above: derive
-        # max_round_exposure_pct from the real post-funding balance so
-        # the resulting ceiling is a known, controlled value (~2000)
-        # regardless of what earlier tests already left in the shared
-        # reserve account.
+        # Same reasoning as _min_stake_to_exceed_exposure()'s own
+        # docstring: a fixed, safely-representable max_round_exposure_pct
+        # (numeric(5,4) can't go below 0.0001) rather than one derived to
+        # hit an absolute ceiling target that used to work only while the
+        # shared reserve stayed under ~20,000,000 ETB. The share
+        # threshold is 10% of the real resulting ceiling; the stake
+        # needed to exceed *that* (not the ceiling itself) is derived the
+        # same exact way, so this remains correct regardless of how large
+        # the shared reserve grows in the future.
         balance = await _fund_reserve(conn, Decimal("40000"))
-        pct = (Decimal("2000") / balance).quantize(Decimal("0.000001"))
+        pct = Decimal("0.0100")
+        ceiling = (balance * pct).quantize(Decimal("0.01"))
+        share_threshold = ceiling * Decimal("0.10")
+        big_stake = _min_stake_to_exceed_exposure(share_threshold, pick_count=1, multipliers=_MULTIPLIERS_BY_PICK_COUNT[1])
         await _seed_keno_round(
-            conn, per_user_round_capacity_share_bps=1000, max_tickets_per_user_per_round=10, max_round_exposure_pct=pct
+            conn, per_user_round_capacity_share_bps=1000, max_tickets_per_user_per_round=10,
+            max_round_exposure_pct=pct, stake_options=[Decimal("10"), big_stake],
         )
         other_user_id = await create_funded_user(conn, Decimal("1000.00"))
-        user_id = await create_funded_user(conn, Decimal("1000.00"))
+        user_id = await create_funded_user(conn, big_stake * 2)
 
     await keno_tickets.place_ticket(
         pool,
@@ -356,7 +413,7 @@ async def test_place_ticket_rejects_when_user_round_share_exceeded(pool: asyncpg
     )
     with pytest.raises(keno_tickets.UserRoundShareExceeded):
         await keno_tickets.place_ticket(
-            pool, redis=object(), user_id=user_id, picks=[2], stake=Decimal("50"), idempotency_key=f"test-{uuid.uuid4()}"
+            pool, redis=object(), user_id=user_id, picks=[2], stake=big_stake, idempotency_key=f"test-{uuid.uuid4()}"
         )
 
 
@@ -370,3 +427,106 @@ async def test_place_ticket_rejects_duplicate_picks(pool: asyncpg.Pool) -> None:
         await keno_tickets.place_ticket(
             pool, redis=object(), user_id=user_id, picks=[1, 1, 2], stake=Decimal("10"), idempotency_key=f"test-{uuid.uuid4()}"
         )
+
+
+# --- responsible gaming (spec 3.3's own "mandatory" per-user daily/loss
+# limit) -- a spec-compliance audit (2026-09-21) found Keno never checked
+# packages/core/responsible_gaming.py at all, unlike Bingo's own
+# round_engine.py::join(). ------------------------------------------------
+
+
+async def test_place_ticket_rejects_a_self_excluded_user(pool: asyncpg.Pool, conn: asyncpg.Connection) -> None:
+    await _seed_keno_round(conn)
+    await _fund_reserve(conn, Decimal("40000"))
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.self_exclude(pool, user_id)  # spec's own 180-day minimum, via the default
+
+    with pytest.raises(keno_tickets.ResponsibleGamingBlock) as exc_info:
+        await keno_tickets.place_ticket(
+            pool, redis=object(), user_id=user_id, picks=[1], stake=Decimal("10"), idempotency_key=f"test-{uuid.uuid4()}"
+        )
+    assert exc_info.value.code == "self_excluded"
+
+
+async def test_place_ticket_rejects_a_user_cooling_off(pool: asyncpg.Pool, conn: asyncpg.Connection) -> None:
+    await _seed_keno_round(conn)
+    await _fund_reserve(conn, Decimal("40000"))
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.cool_off(conn, user_id, duration_hours=24)
+
+    with pytest.raises(keno_tickets.ResponsibleGamingBlock) as exc_info:
+        await keno_tickets.place_ticket(
+            pool, redis=object(), user_id=user_id, picks=[1], stake=Decimal("10"), idempotency_key=f"test-{uuid.uuid4()}"
+        )
+    assert exc_info.value.code == "cooling_off"
+
+
+async def test_place_ticket_rejects_a_stake_that_would_exceed_the_daily_loss_cap(
+    pool: asyncpg.Pool, conn: asyncpg.Connection
+) -> None:
+    await _seed_keno_round(conn)
+    await _fund_reserve(conn, Decimal("40000"))
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_id, Decimal("5.00"))
+
+    # Stake alone (10) already exceeds the 5.00 cap -- no prior loss
+    # needed to trigger this, matching check_stake_allowed()'s own
+    # "net_loss + stake > loss_cap" rule.
+    with pytest.raises(keno_tickets.ResponsibleGamingBlock) as exc_info:
+        await keno_tickets.place_ticket(
+            pool, redis=object(), user_id=user_id, picks=[1], stake=Decimal("10"), idempotency_key=f"test-{uuid.uuid4()}"
+        )
+    assert exc_info.value.code == "loss_limit_reached"
+
+
+async def test_daily_loss_cap_is_combined_across_bingo_and_keno_not_tracked_per_game(
+    pool: asyncpg.Pool, conn: asyncpg.Connection
+) -> None:
+    """The operator's own design decision (2026-09-21, DECISIONS.md): one
+    daily loss cap across the whole platform, not a separate one per
+    game -- responsible_gaming.today_net_loss() sums both games' own
+    stake/payout ledger-transaction kinds together. Proven here by
+    posting a real Bingo-style loss directly against the ledger (no
+    Bingo round machinery needed, just the same 'stake'/'payout' kinds
+    round_engine.py itself posts) and confirming it alone is enough to
+    block a Keno ticket that would push the *combined* total past the
+    cap, even though this user has never played a single hand of Keno
+    before this call."""
+    await _seed_keno_round(conn)
+    await _fund_reserve(conn, Decimal("40000"))
+
+    # Direction 1: a real Bingo-style loss alone is enough to block a
+    # Keno ticket, even though this user's own Keno activity today is
+    # zero. 55 (Bingo) + 10 (the attempted Keno stake, a valid option
+    # for _seed_keno_round's own default tier) = 65, over the 60 cap.
+    user_a = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_a, Decimal("60.00"))
+    cash_a = await ledger.get_or_create_account(conn, user_a, "user_cash")
+    pot = await ledger.get_or_create_account(conn, None, "pot_escrow")
+    await ledger.post(
+        conn, "stake", [ledger.Entry(cash_a.id, Decimal("-55")), ledger.Entry(pot.id, Decimal("55"))],
+        idempotency_key=f"test-bingo-stake-{uuid.uuid4()}", created_by="test",
+    )
+    assert await responsible_gaming.today_net_loss(conn, user_a) == Decimal("55.00")
+
+    with pytest.raises(keno_tickets.ResponsibleGamingBlock) as exc_info:
+        await keno_tickets.place_ticket(
+            pool, redis=object(), user_id=user_a, picks=[1], stake=Decimal("10"), idempotency_key=f"test-{uuid.uuid4()}"
+        )
+    assert exc_info.value.code == "loss_limit_reached"
+
+    # Direction 2 (a fresh user, so the arithmetic isn't constrained by
+    # direction 1's own numbers): a real Keno loss must be visible to
+    # Bingo's own pre-existing check too, not just the other way around.
+    # A genuinely successful 20 ETB Keno ticket first (0 + 20 = 20, well
+    # under the 60 cap), then confirming a hypothetical 45 ETB Bingo
+    # stake would be blocked by the combined total (20 + 45 = 65 > 60).
+    user_b = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_b, Decimal("60.00"))
+    keno_ticket = await keno_tickets.place_ticket(
+        pool, redis=object(), user_id=user_b, picks=[1], stake=Decimal("20"), idempotency_key=f"test-{uuid.uuid4()}"
+    )
+    assert keno_ticket.status == "pending"
+    assert await responsible_gaming.today_net_loss(conn, user_b) == Decimal("20.00")
+    block = await responsible_gaming.check_stake_allowed(conn, user_b, Decimal("45"))
+    assert block.blocked and block.reason == "loss_limit_reached"
