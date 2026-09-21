@@ -16,13 +16,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Response, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
-from packages.core import telegram_auth
+from packages.core import keno_queries, keno_tickets, rate_limit, telegram_auth
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.ledger import user_balance_snapshot
@@ -413,6 +413,139 @@ async def api_create_withdrawal(
         raise HTTPException(status_code=422, detail=code) from exc
 
     return {"status": intent.status, "our_ref": intent.our_ref}
+
+
+# --- Keno (build spec Part 10) --------------------------------------------
+#
+# Every KenoTicketRejected subclass maps to a short error code, the same
+# "distinct exception type, never a raw 500" pattern used above for
+# deposits/withdrawals.
+_KENO_TICKET_ERROR_CODES: dict[type[Exception], str] = {
+    keno_tickets.KenoDisabled: "keno_disabled",
+    keno_tickets.RoundNotAcceptingBets: "round_not_accepting_bets",
+    keno_tickets.InvalidPicks: "invalid_picks",
+    keno_tickets.StakeNotAllowed: "stake_not_allowed",
+    keno_tickets.PickCountNotAllowedAtTier: "pick_count_not_allowed_at_tier",
+    keno_tickets.TooManyTicketsThisRound: "too_many_tickets_this_round",
+    keno_tickets.RoundCapacityReached: "round_capacity_reached",
+    keno_tickets.UserRoundShareExceeded: "user_round_share_exceeded",
+    keno_tickets.SimulatedPlayerCannotPlaceKenoTicket: "simulated_player",
+}
+
+
+def _client_ip(request: Request) -> str:
+    # Same precedence as services/admin/app.py's own _client_ip(): trusted
+    # once behind Cloudflare (which overwrites any client-supplied value
+    # for this header), falling back to the raw connection for a direct
+    # dev/tunnel-less setup.
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        return cf_ip
+    return request.client.host if request.client else "unknown"
+
+
+@app.get("/api/keno/state")
+async def api_keno_state(authorization: str = Header(default="")) -> dict[str, Any]:
+    await _authenticated_user_id(authorization)
+    state = await keno_queries.game_center_state(app.state.pool)
+    if state is None:
+        raise HTTPException(status_code=503, detail="keno_not_configured")
+    return state
+
+
+class PlaceKenoTicketRequest(BaseModel):
+    picks: list[int]
+    stake: str
+    idempotency_key: str
+
+
+@app.post("/api/keno/tickets")
+async def api_place_keno_ticket(
+    body: PlaceKenoTicketRequest, request: Request, authorization: str = Header(default="")
+) -> dict[str, Any]:
+    user_id = await _authenticated_user_id(authorization)
+
+    # Part 12: rate-limited per user and per IP -- two independent
+    # buckets, either one tripping is enough to reject (the IP bucket
+    # catches many accounts hammering from one source; the user bucket
+    # catches one account hammering from anywhere).
+    if not await rate_limit.allow(app.state.redis, "keno_ticket_user", str(user_id), **rate_limit.KENO_TICKET):
+        raise HTTPException(status_code=429, detail="rate_limited")
+    if not await rate_limit.allow(app.state.redis, "keno_ticket_ip", _client_ip(request), **rate_limit.KENO_TICKET):
+        raise HTTPException(status_code=429, detail="rate_limited")
+
+    try:
+        stake = Decimal(body.stake)
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="invalid_stake") from None
+    if stake <= 0:
+        raise HTTPException(status_code=422, detail="invalid_stake")
+    if not body.idempotency_key.strip():
+        raise HTTPException(status_code=422, detail="missing_idempotency_key")
+
+    try:
+        ticket = await keno_tickets.place_ticket(
+            app.state.pool,
+            app.state.redis,
+            user_id=user_id,
+            picks=body.picks,
+            stake=stake,
+            idempotency_key=body.idempotency_key,
+        )
+    except keno_tickets.TicketRejected as exc:
+        code = _KENO_TICKET_ERROR_CODES.get(type(exc), "ticket_rejected")
+        raise HTTPException(status_code=422, detail=code) from exc
+
+    return {
+        "id": ticket.id,
+        "round_id": ticket.round_id,
+        "picks": sorted(ticket.picks),
+        "stake": str(ticket.stake),
+        "status": ticket.status,
+    }
+
+
+@app.get("/api/keno/tickets")
+async def api_my_keno_tickets(
+    round_id: int | None = None,
+    before_id: int | None = None,
+    limit: int = 20,
+    authorization: str = Header(default=""),
+) -> list[dict[str, Any]]:
+    user_id = await _authenticated_user_id(authorization)
+    return await keno_queries.my_tickets(app.state.pool, user_id, round_id=round_id, before_id=before_id, limit=limit)
+
+
+@app.get("/api/keno/stats")
+async def api_my_keno_stats(authorization: str = Header(default="")) -> dict[str, Any]:
+    user_id = await _authenticated_user_id(authorization)
+    return await keno_queries.my_statistics(app.state.pool, user_id)
+
+
+@app.get("/api/keno/rounds/recent")
+async def api_keno_recent_results(limit: int = 20, authorization: str = Header(default="")) -> list[dict[str, Any]]:
+    await _authenticated_user_id(authorization)
+    return await keno_queries.recent_results(app.state.pool, limit=limit)
+
+
+@app.get("/api/keno/rounds/hot-cold")
+async def api_keno_hot_cold(lookback_rounds: int = 50, authorization: str = Header(default="")) -> dict[str, Any]:
+    await _authenticated_user_id(authorization)
+    return await keno_queries.hot_cold_numbers(app.state.pool, lookback_rounds=lookback_rounds)
+
+
+@app.get("/api/keno/rounds/{round_id}")
+async def api_keno_round_detail(round_id: int, authorization: str = Header(default="")) -> dict[str, Any]:
+    """Round result + independent verification payload in one response --
+    Part 4.1's "public verification endpoint." The Mini App's own
+    verify-draw button (packages.core.keno.verify_draw, same function
+    this reuses) can also recompute it client-side; this is the
+    server-side confirmation."""
+    await _authenticated_user_id(authorization)
+    detail = await keno_queries.round_detail(app.state.pool, round_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="round_not_found")
+    return detail
 
 
 class _RevalidateStaticFiles(StaticFiles):

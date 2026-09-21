@@ -30,6 +30,7 @@ from services.admin import (
     bonus_queries,
     bot_content_queries,
     command_registry_queries,
+    keno_queries,
     notification_queries,
     queries,
     search_queries,
@@ -1404,6 +1405,184 @@ async def referral_funnel(
     admin: Annotated[AdminSession, Depends(require("bonuses:view"))],
 ) -> dict[str, Any]:
     return await bonus_queries.referral_funnel_admin(app.state.pool)
+
+
+# --- Keno (build spec Part 15) ---------------------------------------------
+
+
+@app.get("/keno/dashboard")
+async def keno_dashboard(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+) -> dict[str, Any]:
+    return await keno_queries.dashboard_summary_admin(app.state.pool)
+
+
+@app.get("/keno/configs")
+async def list_keno_configs(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+) -> list[dict[str, Any]]:
+    return await keno_queries.list_configs_admin(app.state.pool)
+
+
+class CreateKenoConfigRequest(BaseModel):
+    round_cycle_seconds: int
+    betting_seconds: int
+    draw_seconds: int
+    result_seconds: int
+    min_picks: int
+    max_picks: int
+    max_tickets_per_user_per_round: int
+    per_user_round_capacity_share_bps: int
+    jackpot_diversion_bps: int
+    rtp_floor_bps: int = 7500
+    rtp_ceiling_bps: int = 9700
+    keno_enabled: bool
+    reason: str
+
+
+@app.post("/keno/configs")
+async def create_keno_config(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: CreateKenoConfigRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await keno_queries.create_config_admin(
+            app.state.pool, admin_id=admin.admin_id, ip_address=_client_ip(request), **body.model_dump()
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class KenoKillSwitchRequest(BaseModel):
+    enabled: bool
+    reason: str
+
+
+@app.post("/keno/kill-switch")
+async def keno_kill_switch(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: KenoKillSwitchRequest,
+) -> dict[str, Any]:
+    """Part 0's own required "one admin toggle" that instantly stops new
+    rounds and blocks new tickets -- superadmin-only (keno:configure),
+    the same highest-leverage-lever tier as rooms:emergency_stop."""
+    _require_reason(body.reason)
+    try:
+        return await keno_queries.set_keno_enabled_admin(
+            app.state.pool, admin_id=admin.admin_id, enabled=body.enabled, reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/keno/paytables")
+async def list_keno_paytables(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+    pick_count: int | None = None,
+) -> list[dict[str, Any]]:
+    return await keno_queries.list_paytables_admin(app.state.pool, pick_count=pick_count)
+
+
+class PreviewKenoPaytableRequest(BaseModel):
+    pick_count: int
+    multipliers: dict[str, str]
+
+
+@app.post("/keno/paytables/preview")
+async def preview_keno_paytable(
+    admin: Annotated[AdminSession, Depends(require("keno:manage"))],
+    body: PreviewKenoPaytableRequest,
+) -> dict[str, Any]:
+    """Part 3.2's "the admin paytable editor must compute and display
+    exact RTP ... live" -- pure computation, nothing persisted, safe for
+    ops/superadmin (keno:manage) to call on every keystroke while
+    designing a table before a superadmin actually activates it."""
+    try:
+        return keno_queries.preview_paytable_stats(body.pick_count, body.multipliers)
+    except (keno_queries.InvalidKenoConfig, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class CreateKenoPaytableRequest(BaseModel):
+    pick_count: int
+    profile: str
+    multipliers: dict[str, str]
+    reason: str
+
+
+@app.post("/keno/paytables")
+async def create_keno_paytable(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: CreateKenoPaytableRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await keno_queries.create_paytable_admin(
+            app.state.pool, admin_id=admin.admin_id, pick_count=body.pick_count, profile=body.profile,
+            multipliers=body.multipliers, reason=body.reason, ip_address=_client_ip(request),
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/keno/tiers")
+async def list_keno_tiers(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+) -> list[dict[str, Any]]:
+    return await keno_queries.list_tiers_admin(app.state.pool)
+
+
+class CreateKenoTierRequest(BaseModel):
+    tier_number: int
+    min_reserve: Decimal
+    max_pick_count: int
+    max_top_multiplier: Decimal
+    stake_options: list[Decimal]
+    max_win_per_ticket: Decimal
+    max_round_exposure_pct: Decimal
+    paytable_profile: str
+    reason: str
+
+
+@app.post("/keno/tiers")
+async def create_keno_tier(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: CreateKenoTierRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await keno_queries.create_tier_admin(
+            app.state.pool, admin_id=admin.admin_id, ip_address=_client_ip(request), **body.model_dump()
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class SetKenoCurrentTierRequest(BaseModel):
+    tier_id: int
+    reason: str
+
+
+@app.post("/keno/tiers/set-current")
+async def set_keno_current_tier(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: SetKenoCurrentTierRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await keno_queries.set_current_tier_admin(
+            app.state.pool, admin_id=admin.admin_id, tier_id=body.tier_id, reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/bonuses/fraud-candidates")

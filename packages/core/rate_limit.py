@@ -170,3 +170,13 @@ TELEBIRR_REDEEM = {"capacity": 10, "refill_per_second": 10.0 / 3600.0}
 # couple of times never gets locked out, tight enough to make online
 # brute-forcing impractical.
 ADMIN_LOGIN = {"capacity": 5, "refill_per_second": 5.0 / 900.0}
+# Keno build spec Part 12: "Rate-limit bet placement per user and per
+# IP." A round's own betting window is only ~25s (Part 7.5 default), so
+# a human placing several tickets per round is normal -- 20/minute is
+# generous enough for that (including a player buying multiple tickets
+# back to back) while still bounding a scripted hammering attempt well
+# below what a real round could ever accept anyway (Part 3.3's own
+# per-round/per-user caps are the real money-safety backstop; this is
+# just the same "don't let one client flood the hot path" discipline
+# every other write endpoint in this codebase already has).
+KENO_TICKET = {"capacity": 20, "refill_per_second": 20.0 / 60.0}

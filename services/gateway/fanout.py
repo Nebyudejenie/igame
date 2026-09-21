@@ -137,10 +137,15 @@ class FanoutHub:
         self._pubsub = redis.pubsub()
         self._room_subscribers: dict[int, set[ConnectionQueue]] = defaultdict(set)
         self._user_subscribers: dict[int, set[ConnectionQueue]] = defaultdict(set)
+        # Keno has exactly one continuous round stream, not a per-room
+        # concept (services/engine/keno_round_engine.py publishes every
+        # public round event to one literal channel, "keno:live") -- a
+        # plain set, not a dict keyed by an id that doesn't exist here.
+        self._keno_subscribers: set[ConnectionQueue] = set()
         self._listener_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        await self._pubsub.psubscribe("room:*", "user:*")
+        await self._pubsub.psubscribe("room:*", "user:*", "keno:*")
         self._listener_task = asyncio.create_task(self._listen())
 
     async def stop(self) -> None:
@@ -149,7 +154,7 @@ class FanoutHub:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._listener_task
             self._listener_task = None
-        await self._pubsub.punsubscribe("room:*", "user:*")
+        await self._pubsub.punsubscribe("room:*", "user:*", "keno:*")
         await self._pubsub.aclose()  # type: ignore[no-untyped-call]
 
     def subscribe_room(self, room_id: int, cq: ConnectionQueue) -> None:
@@ -174,6 +179,12 @@ class FanoutHub:
         if not subs:
             del self._user_subscribers[user_id]
 
+    def subscribe_keno(self, cq: ConnectionQueue) -> None:
+        self._keno_subscribers.add(cq)
+
+    def unsubscribe_keno(self, cq: ConnectionQueue) -> None:
+        self._keno_subscribers.discard(cq)
+
     async def _listen(self) -> None:
         async for message in self._pubsub.listen():
             if not isinstance(message, dict) or message.get("type") != "pmessage":
@@ -191,4 +202,7 @@ class FanoutHub:
                 if not user_id_str.isdigit():
                     continue
                 for cq in list(self._user_subscribers.get(int(user_id_str), ())):
+                    cq.offer(data)
+            elif channel == "keno:live":
+                for cq in list(self._keno_subscribers):
                     cq.offer(data)

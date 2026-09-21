@@ -161,6 +161,17 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # highest-leverage lever in this screen (kills every bot platform-wide
     # at once, and doubles as the global on/off switch) -- superadmin only.
     "simulated_players:stop_all": frozenset({"superadmin"}),
+
+    # Keno (build spec Part 15). Same breadth tiering as payments/bonuses:
+    # broad read access, narrower write access, and the single highest
+    # -leverage lever (activating a paytable/tier, or the global kill
+    # switch) reserved for superadmin only -- an admin editing the live
+    # paytable or reserve-tier ladder is exactly the kind of action a
+    # compromised/rogue lower-privilege account could otherwise use to
+    # quietly move the house edge or blow through the reserve.
+    "keno:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    "keno:manage": frozenset({"ops", "superadmin"}),
+    "keno:configure": frozenset({"superadmin"}),
 }
 
 

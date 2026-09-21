@@ -147,6 +147,15 @@ class ConnectionHandler:
             user_balance_snapshot(self._pool, user_id),
         )
         self._hub.subscribe_user(user_id, self._cq)
+        # Every connection gets the Keno broadcast channel -- unlike Bingo
+        # rooms (subscribed only once a player actually joins one), Keno
+        # has exactly one continuous round stream and the Game Center /
+        # Keno screen needs to reflect it the moment the socket is up,
+        # the same reasoning the user:{id} balance channel is subscribed
+        # unconditionally here rather than waiting for the wallet screen
+        # to open.
+        self._hub.subscribe_keno(self._cq)
+        metrics.keno_ws_connections.inc()
 
         await self._ws.send_text(
             json.dumps(
@@ -432,4 +441,6 @@ class ConnectionHandler:
             self._hub.unsubscribe_room(room_id, self._cq)
         if self._user_id is not None:
             self._hub.unsubscribe_user(self._user_id, self._cq)
+            self._hub.unsubscribe_keno(self._cq)
             metrics.gateway_connections.dec()
+            metrics.keno_ws_connections.dec()
