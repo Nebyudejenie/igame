@@ -542,35 +542,93 @@
 
     <div id="keno-recent-draws" class="keno-recent-draws"></div>
 
-    <div class="keno-quick-actions">
+    <div class="keno-quick-actions keno-quick-actions-4">
       <button id="keno-clear-btn" type="button" class="btn-secondary" data-i18n="keno.clear"></button>
       <button id="keno-lucky-btn" type="button" class="btn-secondary" data-i18n="keno.lucky_pick"></button>
       <button id="keno-repeat-btn" type="button" class="btn-secondary" data-i18n="keno.repeat"></button>
+      <button id="keno-autoplay-btn" type="button" class="btn-secondary" data-i18n="keno.autoplay_button" disabled></button>
     </div>
 
-    <div class="keno-picks-row">
-      <span id="keno-picks-count">0 / 10</span>
-      <span id="keno-match-counter" class="keno-match-counter hidden"></span>
-    </div>
-
-    <div class="keno-stake-row">
-      <span data-i18n="keno.stake_label"></span>
-      <div id="keno-stake-chips" class="amount-chips"></div>
-    </div>
-
-    <div class="keno-payout-preview">
-      <div class="keno-payout-preview-top">
-        <span data-i18n="keno.potential_payout_label"></span>
-        <span id="keno-payout-amount">0.00 ETB</span>
+    <!-- Live status while a session is running (packages/core/
+         keno_autoplay.py) -- replaces the normal betting controls below
+         rather than showing alongside them, since the board is locked to
+         the session's own picks for its whole duration. -->
+    <div id="keno-autoplay-status-bar" class="keno-autoplay-status-bar hidden">
+      <div class="keno-autoplay-status-top">
+        <span id="keno-autoplay-status-label" data-i18n="keno.autoplay_running_label"></span>
+        <span id="keno-autoplay-status-rounds"></span>
       </div>
-      <!-- Live Match -> Pays rows for the current pick count -- filled by
-           renderPicksAndPayout() in keno.js, empty/hidden until at least
-           one number is picked. -->
-      <div id="keno-match-pays-rows" class="keno-match-pays-rows hidden"></div>
+      <div class="keno-autoplay-status-bottom">
+        <span>
+          <span data-i18n="keno.autoplay_net_label"></span>
+          <strong id="keno-autoplay-net-amount">0.00 ETB</strong>
+        </span>
+        <button id="keno-autoplay-stop-btn" type="button" class="btn-secondary" data-i18n="keno.autoplay_stop_button"></button>
+      </div>
     </div>
 
-    <button id="keno-play-btn" type="button" class="btn-primary btn-gold" data-i18n="keno.play_button" disabled></button>
-    <p id="keno-play-status" class="wallet-note"></p>
+    <div id="keno-betting-controls">
+      <div class="keno-picks-row">
+        <span id="keno-picks-count">0 / 10</span>
+        <span id="keno-match-counter" class="keno-match-counter hidden"></span>
+      </div>
+
+      <div class="keno-stake-row">
+        <span data-i18n="keno.stake_label"></span>
+        <div id="keno-stake-chips" class="amount-chips"></div>
+      </div>
+
+      <div class="keno-payout-preview">
+        <div class="keno-payout-preview-top">
+          <span data-i18n="keno.potential_payout_label"></span>
+          <span id="keno-payout-amount">0.00 ETB</span>
+        </div>
+        <!-- Live Match -> Pays rows for the current pick count -- filled by
+             renderPicksAndPayout() in keno.js, empty/hidden until at least
+             one number is picked. -->
+        <div id="keno-match-pays-rows" class="keno-match-pays-rows hidden"></div>
+      </div>
+
+      <button id="keno-play-btn" type="button" class="btn-primary btn-gold" data-i18n="keno.play_button" disabled></button>
+      <p id="keno-play-status" class="wallet-note"></p>
+    </div>
+
+    <!-- Autoplay setup (packages/core/keno_autoplay.py) -- opened from
+         keno-autoplay-btn above, which requires picks+stake already
+         selected exactly like a normal ticket (reuses that same
+         selection, not a second picker). -->
+    <div id="keno-autoplay-overlay" class="keno-overlay hidden">
+      <div class="keno-overlay-card">
+        <div class="keno-overlay-header">
+          <span data-i18n="keno.autoplay_setup_title"></span>
+          <button id="keno-autoplay-setup-close-btn" type="button" class="keno-icon-btn" aria-label="close">✕</button>
+        </div>
+        <p id="keno-autoplay-summary" class="keno-section-label"></p>
+
+        <p class="keno-section-label" data-i18n="keno.autoplay_rounds_label"></p>
+        <div id="keno-autoplay-rounds-chips" class="amount-chips"></div>
+
+        <label class="keno-autoplay-stop-row">
+          <input id="keno-autoplay-stop-win-toggle" type="checkbox" />
+          <span data-i18n="keno.autoplay_stop_on_win_label"></span>
+          <input id="keno-autoplay-stop-win-amount" type="number" inputmode="decimal" min="0" step="0.01"
+                 data-i18n-placeholder="keno.autoplay_amount_placeholder" disabled />
+        </label>
+        <label class="keno-autoplay-stop-row">
+          <input id="keno-autoplay-stop-loss-toggle" type="checkbox" />
+          <span data-i18n="keno.autoplay_stop_on_loss_label"></span>
+          <input id="keno-autoplay-stop-loss-amount" type="number" inputmode="decimal" min="0" step="0.01"
+                 data-i18n-placeholder="keno.autoplay_amount_placeholder" disabled />
+        </label>
+
+        <p id="keno-autoplay-setup-status" class="wallet-note"></p>
+
+        <div class="keno-overlay-actions">
+          <button id="keno-autoplay-setup-cancel-btn" type="button" class="link-btn" data-i18n="keno.autoplay_cancel_button"></button>
+          <button id="keno-autoplay-setup-start-btn" type="button" class="btn-primary btn-gold" data-i18n="keno.autoplay_start_button"></button>
+        </div>
+      </div>
+    </div>
 
     <div id="keno-my-tickets-section" class="keno-my-tickets hidden">
       <p class="keno-section-label" data-i18n="keno.my_tickets_label"></p>

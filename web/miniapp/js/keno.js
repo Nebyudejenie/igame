@@ -36,6 +36,15 @@ let countdownInterval = null;
 let closingWarned = false;
 let activeScreen = null; // "keno" | "keno-result" | "keno-history" | null
 
+// Autoplay/multi-race (packages/core/keno_autoplay.py) -- last GET/POST
+// /api/keno/autoplay response, or null when no session is active. No
+// dedicated WS event exists for session updates (a deliberate choice --
+// every autoplay-placed ticket already rides the same keno.ticket.settled
+// push a manual one does), so this is kept fresh by re-fetching on the
+// round-lifecycle events that already fire regardless (keno.betting.open,
+// keno.round.completed) rather than adding a new server push for it.
+let activeAutoplaySession = null;
+
 function el(id) {
   return document.getElementById(id);
 }
@@ -85,6 +94,10 @@ export async function enter() {
   }
   showKenoScreen("keno");
   await refreshState();
+  // Restores an already-running session's own UI (locked board, status
+  // bar) if the player left mid-session and came back -- the session
+  // itself lives entirely server-side, so there's nothing else to resume.
+  await refreshAutoplaySession();
   if (!localStorage.getItem(ONBOARD_SEEN_KEY)) {
     try {
       localStorage.setItem(ONBOARD_SEEN_KEY, "1");
@@ -107,7 +120,10 @@ subscribe((state) => {
     if (onKeno) updateMainButton();
     else {
       tg.MainButton.hide();
-      if (tg.MainButton.offClick) tg.MainButton.offClick(handlePlay);
+      if (tg.MainButton.offClick) {
+        tg.MainButton.offClick(handlePlay);
+        tg.MainButton.offClick(stopAutoplay);
+      }
     }
   }
   if (tg && tg.disableVerticalSwipes && tg.enableVerticalSwipes) {
@@ -145,6 +161,12 @@ function updateClosingConfirmation() {
 
 function toggleNumber(number) {
   if (!currentRound || currentRound.status !== "betting_open") return;
+  // The board's own .locked class only blocks pointer events (CSS
+  // pointer-events:none) -- a keyboard-focused cell's Enter/Space still
+  // reaches this handler directly, so an active autoplay session (picks
+  // fixed server-side for its whole duration) needs its own explicit
+  // guard here too, not just the visual lock.
+  if (activeAutoplaySession && activeAutoplaySession.status === "active") return;
   if (selectedPicks.has(number)) {
     selectedPicks.delete(number);
   } else {
@@ -275,6 +297,7 @@ function updatePlayEnabled() {
   const domBtn = el("keno-play-btn");
   domBtn.disabled = !playable;
   domBtn.textContent = isAwaitingNextPick() ? t("keno.play_button_waiting") : t("keno.play_button");
+  updateAutoplayButtonEnabled();
   if (tg && tg.MainButton) updateMainButton();
 }
 
@@ -286,8 +309,27 @@ function updatePlayEnabled() {
 
 function updateMainButton() {
   const domBtn = el("keno-play-btn");
-  const playable = isSelectionPlayable();
   domBtn.classList.add("hidden");
+  const autoplayActive = activeAutoplaySession && activeAutoplaySession.status === "active";
+
+  // MainButton-as-stop while a session is running -- the one action a
+  // player actually needs one-thumb-reachable the whole time autoplay is
+  // going, the same reasoning PLAY itself gets this treatment for a
+  // manual bet.
+  if (autoplayActive) {
+    if (tg.MainButton.offClick) tg.MainButton.offClick(handlePlay);
+    tg.MainButton.setText(t("keno.autoplay_stop_button"));
+    if (tg.MainButton.setParams) {
+      tg.MainButton.setParams({ color: "#EF4444", text_color: "#ffffff" }); // matches --danger (tokens.css)
+    }
+    if (tg.MainButton.enable) tg.MainButton.enable();
+    tg.MainButton.show();
+    if (tg.MainButton.onClick) tg.MainButton.onClick(stopAutoplay);
+    return;
+  }
+
+  if (tg.MainButton.offClick) tg.MainButton.offClick(stopAutoplay);
+  const playable = isSelectionPlayable();
   tg.MainButton.setText(isAwaitingNextPick() ? t("keno.play_button_waiting") : t("keno.play_button"));
   if (tg.MainButton.setParams) {
     tg.MainButton.setParams({ color: "#FFC94A", text_color: "#1a1200" });
@@ -390,6 +432,199 @@ function renderMyTickets() {
     row.innerHTML = `<span class="keno-ticket-picks">${picksText}</span><span>${statusText}</span>`;
     list.appendChild(row);
   }
+}
+
+// --- autoplay / multi-race (packages/core/keno_autoplay.py) ---------------
+// One server-driven mechanism covering both "autoplay with stop-on-win/
+// loss" and "buy N future rounds" -- see that module's own docstring.
+// Every ticket it places goes through the exact same place_ticket() path
+// a manual bet does, so a rejection (insufficient balance, a responsible
+// -gaming block, anything) just stops the session server-side; this UI
+// only starts/stops sessions and reflects whatever state the server
+// reports, never decides on its own whether to keep going.
+
+const AUTOPLAY_START_ERROR_KEYS = new Set([
+  "autoplay_session_already_active", "invalid_autoplay_config", "invalid_stake",
+  "invalid_stop_on_win_amount", "invalid_stop_on_loss_amount",
+]);
+
+let autoplayRoundsSelection = 10; // null means "no limit" -- only meaningful while the setup sheet is open
+
+function isAutoplayOfferable() {
+  return isSelectionPlayable() && !(activeAutoplaySession && activeAutoplaySession.status === "active");
+}
+
+function updateAutoplayButtonEnabled() {
+  el("keno-autoplay-btn").disabled = !isAutoplayOfferable();
+}
+
+// Kept fresh on the round-lifecycle WS events (see this module's own
+// activeAutoplaySession comment for why there's no dedicated push).
+async function refreshAutoplaySession() {
+  try {
+    const response = await fetch("/api/keno/autoplay", { headers: authHeader() });
+    if (!response.ok) return;
+    const data = await response.json();
+    const wasActive = activeAutoplaySession && activeAutoplaySession.status === "active";
+    activeAutoplaySession = data;
+    if (wasActive && (!data || data.status !== "active")) {
+      announceAutoplayEnded(data);
+    }
+    renderAutoplayUI();
+  } catch {
+    /* keeps showing the last-known state -- never worse than stale */
+  }
+}
+
+function announceAutoplayEnded(session) {
+  if (!session || !session.stop_reason) return;
+  let key = `keno.autoplay_ended.${session.stop_reason}`;
+  if (session.stop_reason.startsWith("ticket_rejected:")) {
+    const code = session.stop_reason.slice("ticket_rejected:".length);
+    key = ERROR_KEYS.has(code) ? `keno.error.${code}` : "keno.autoplay_error.generic";
+  } else if (!["manual", "rounds_exhausted", "stop_on_win", "stop_on_loss"].includes(session.stop_reason)) {
+    key = "keno.autoplay_error.generic";
+  }
+  const won = session.net_position && Number(session.net_position) > 0;
+  setPlayStatus(key, won ? "success" : null);
+}
+
+function renderAutoplayUI() {
+  const active = activeAutoplaySession && activeAutoplaySession.status === "active";
+  el("keno-autoplay-status-bar").classList.toggle("hidden", !active);
+  el("keno-betting-controls").classList.toggle("hidden", active);
+  // Clear/Lucky Pick/Repeat all mutate selectedPicks directly -- without
+  // this, tapping any of them while a session is running would stomp the
+  // locked session's own picks display (the session itself is unaffected
+  // server-side either way, but the board would lie about what it's
+  // actually betting on).
+  for (const id of ["keno-clear-btn", "keno-lucky-btn", "keno-repeat-btn"]) {
+    el(id).disabled = active;
+  }
+  if (active) {
+    selectedPicks = new Set(activeAutoplaySession.picks);
+    board.setSelected(selectedPicks);
+    board.setLocked(true);
+    const s = activeAutoplaySession;
+    el("keno-autoplay-status-rounds").textContent = s.rounds_total
+      ? t("keno.autoplay_status_rounds", { placed: s.rounds_placed, total: s.rounds_total })
+      : t("keno.autoplay_status_rounds_unlimited", { placed: s.rounds_placed });
+    const net = Number(s.net_position);
+    const netEl = el("keno-autoplay-net-amount");
+    netEl.textContent = `${net >= 0 ? "+" : ""}${net.toFixed(2)} ETB`;
+    netEl.classList.toggle("win", net > 0);
+    netEl.classList.toggle("loss", net < 0);
+  } else {
+    board.setLocked(!currentRound || currentRound.status !== "betting_open");
+  }
+  updateAutoplayButtonEnabled();
+}
+
+function openAutoplaySetup() {
+  if (!isAutoplayOfferable()) return;
+  el("keno-autoplay-summary").textContent = t("keno.autoplay_summary", {
+    picks: selectedPicks.size,
+    stake: selectedStake,
+  });
+  autoplayRoundsSelection = 10;
+  const chipsEl = el("keno-autoplay-rounds-chips");
+  chipsEl.innerHTML = "";
+  const options = [["5", 5], ["10", 10], ["25", 25], ["50", 50], [t("keno.autoplay_no_limit"), null]];
+  for (const [label, value] of options) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "amount-chip";
+    chip.textContent = label;
+    if (value === autoplayRoundsSelection) chip.classList.add("selected");
+    chip.addEventListener("click", () => {
+      autoplayRoundsSelection = value;
+      chipsEl.querySelectorAll(".amount-chip").forEach((c) => c.classList.remove("selected"));
+      chip.classList.add("selected");
+    });
+    chipsEl.appendChild(chip);
+  }
+
+  el("keno-autoplay-stop-win-toggle").checked = false;
+  el("keno-autoplay-stop-win-amount").disabled = true;
+  el("keno-autoplay-stop-win-amount").value = "";
+  el("keno-autoplay-stop-loss-toggle").checked = false;
+  el("keno-autoplay-stop-loss-amount").disabled = true;
+  el("keno-autoplay-stop-loss-amount").value = "";
+  setAutoplaySetupStatus(null);
+
+  el("keno-autoplay-overlay").classList.remove("hidden");
+}
+
+function closeAutoplaySetup() {
+  el("keno-autoplay-overlay").classList.add("hidden");
+}
+
+function setAutoplaySetupStatus(key, kind) {
+  const node = el("keno-autoplay-setup-status");
+  node.textContent = key ? t(key) : "";
+  node.classList.remove("error", "success");
+  if (kind) node.classList.add(kind);
+}
+
+async function startAutoplay() {
+  const winEnabled = el("keno-autoplay-stop-win-toggle").checked;
+  const lossEnabled = el("keno-autoplay-stop-loss-toggle").checked;
+  const winAmount = winEnabled ? el("keno-autoplay-stop-win-amount").value : null;
+  const lossAmount = lossEnabled ? el("keno-autoplay-stop-loss-amount").value : null;
+
+  // Mirrors keno_autoplay.start_session()'s own validation client-side --
+  // a fast, specific message instead of a round trip for the common
+  // mistakes; the server's own check is still the real gate either way.
+  if (autoplayRoundsSelection === null && !winEnabled && !lossEnabled) {
+    setAutoplaySetupStatus("keno.autoplay_error.config_required", "error");
+    return;
+  }
+  if ((winEnabled && !(Number(winAmount) > 0)) || (lossEnabled && !(Number(lossAmount) > 0))) {
+    setAutoplaySetupStatus("keno.autoplay_error.invalid_autoplay_config", "error");
+    return;
+  }
+
+  el("keno-autoplay-setup-start-btn").disabled = true;
+  try {
+    const response = await fetch("/api/keno/autoplay", {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        picks: Array.from(selectedPicks),
+        stake: selectedStake,
+        rounds_total: autoplayRoundsSelection,
+        stop_on_win_amount: winEnabled ? winAmount : null,
+        stop_on_loss_amount: lossEnabled ? lossAmount : null,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const code = AUTOPLAY_START_ERROR_KEYS.has(data.detail) ? data.detail : "generic";
+      setAutoplaySetupStatus(`keno.autoplay_error.${code}`, "error");
+      haptics.warning();
+      return;
+    }
+    activeAutoplaySession = data;
+    closeAutoplaySetup();
+    haptics.success();
+    renderAutoplayUI();
+  } catch {
+    setAutoplaySetupStatus("keno.autoplay_error.generic", "error");
+  } finally {
+    el("keno-autoplay-setup-start-btn").disabled = false;
+  }
+}
+
+async function stopAutoplay() {
+  el("keno-autoplay-stop-btn").disabled = true;
+  try {
+    await fetch("/api/keno/autoplay", { method: "DELETE", headers: authHeader() });
+  } catch {
+    /* refreshAutoplaySession() below is the real source of truth regardless */
+  } finally {
+    el("keno-autoplay-stop-btn").disabled = false;
+  }
+  await refreshAutoplaySession();
 }
 
 // --- server state (REST) ---------------------------------------------------
@@ -511,6 +746,13 @@ ws.on("keno.betting.open", async (msg) => {
   closingWarned = false;
   await refreshState(); // paytable/jackpot/tier can only change between rounds -- one cheap fetch per round keeps them honest without a dedicated field on every WS frame
   if (currentRound) currentRound.round_id = msg.round_id;
+  // Every new round is exactly when place_for_active_sessions() places
+  // this round's autoplay ticket server-side (if any session is active) --
+  // the natural, already-firing moment to pick up rounds_placed advancing
+  // or a just-crossed exhaustion, without a dedicated WS push for it.
+  // Runs after refreshState() above so its own board.setLocked()/
+  // setSelected() (an active session's own picks) wins over that call's.
+  await refreshAutoplaySession();
 });
 
 ws.on("keno.betting.closing", (msg) => {
@@ -600,6 +842,13 @@ ws.on("keno.draw.completed", (msg) => {
 });
 
 ws.on("keno.round.completed", (msg) => {
+  // record_settlement() (packages/core/keno_autoplay.py) updates
+  // net_position/status right around when this event fires -- refreshed
+  // unconditionally, not gated by roundIdMatches like the status-pill
+  // logic below, since an active session's own net_position matters
+  // regardless of which round happens to be on screen right now.
+  refreshAutoplaySession();
+
   // Purely a status-pill convenience for whichever round is actually on
   // screen right now -- ticket settlement/result-display is handled
   // entirely by keno.ticket.settled below, independently of this event
@@ -900,6 +1149,18 @@ function wireStaticControls() {
   el("keno-clear-btn").addEventListener("click", clearPicks);
   el("keno-lucky-btn").addEventListener("click", luckyPick);
   el("keno-repeat-btn").addEventListener("click", repeatLastPicks);
+
+  el("keno-autoplay-btn").addEventListener("click", openAutoplaySetup);
+  el("keno-autoplay-setup-close-btn").addEventListener("click", closeAutoplaySetup);
+  el("keno-autoplay-setup-cancel-btn").addEventListener("click", closeAutoplaySetup);
+  el("keno-autoplay-setup-start-btn").addEventListener("click", startAutoplay);
+  el("keno-autoplay-stop-btn").addEventListener("click", stopAutoplay);
+  el("keno-autoplay-stop-win-toggle").addEventListener("change", (event) => {
+    el("keno-autoplay-stop-win-amount").disabled = !event.target.checked;
+  });
+  el("keno-autoplay-stop-loss-toggle").addEventListener("change", (event) => {
+    el("keno-autoplay-stop-loss-amount").disabled = !event.target.checked;
+  });
   el("keno-play-btn").addEventListener("click", handlePlay);
   el("keno-paytable-btn").addEventListener("click", openPaytable);
   el("keno-paytable-close-btn").addEventListener("click", () => el("keno-paytable-overlay").classList.add("hidden"));

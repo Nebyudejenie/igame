@@ -324,6 +324,10 @@
   margin-bottom: 10px;
 }
 
+.keno-quick-actions-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .keno-quick-actions .btn-secondary {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -333,6 +337,108 @@
   font-size: var(--fs-xs);
   font-weight: 600;
   text-align: center;
+}
+
+.keno-quick-actions .btn-secondary:disabled {
+  opacity: 0.45;
+}
+
+/* --- autoplay / multi-race (packages/core/keno_autoplay.py) --- */
+
+.keno-autoplay-status-bar {
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 14%, transparent), var(--surface) 70%);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  margin-bottom: 12px;
+}
+
+.keno-autoplay-status-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+
+.keno-autoplay-status-rounds {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.keno-autoplay-status-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.keno-autoplay-status-bottom span {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+#keno-autoplay-net-amount {
+  font-family: var(--font-display);
+  color: var(--text);
+}
+
+#keno-autoplay-net-amount.win {
+  color: var(--gold);
+}
+
+#keno-autoplay-net-amount.loss {
+  color: var(--danger);
+}
+
+.keno-autoplay-status-bottom .btn-secondary {
+  background: var(--surface);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.keno-autoplay-stop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  font-size: var(--fs-sm);
+}
+
+.keno-autoplay-stop-row span {
+  flex: 1;
+}
+
+.keno-autoplay-stop-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.keno-autoplay-stop-row input[type="number"] {
+  width: 110px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.keno-autoplay-stop-row input[type="number"]:disabled {
+  opacity: 0.4;
+}
+
+#keno-autoplay-rounds-chips {
+  margin-bottom: 4px;
 }
 
 .keno-picks-row {
