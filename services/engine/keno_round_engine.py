@@ -46,7 +46,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import keno, keno_autoplay, keno_config, keno_exposure, ledger, metrics
+from packages.core import keno, keno_autoplay, keno_config, keno_exposure, keno_tier_automation, ledger, metrics
 from services.engine.keno_lock import KenoRoundLock
 
 logger = structlog.get_logger()
@@ -175,10 +175,21 @@ class KenoRoundEngine:
                 )
                 await self._record_event(conn, round_id, None, "scheduled")
         metrics.keno_rounds_created_total.inc()
-        await self._update_solvency_gauges()
+        reserve_balance = await self._update_solvency_gauges()
+        # Tier automation runs *after* this round's own tier is already
+        # pinned above -- keno.md Part 7.2's "never mid-round" rule falls
+        # out of that ordering for free: any change here only ever
+        # affects the round created next, never this one. Circuit breaker
+        # checked first: a payout spike severe enough to trip it should
+        # win over a reserve-threshold promotion landing in the very same
+        # cycle, not race it.
+        breaker_result = await keno_tier_automation.check_circuit_breaker(self._pool)
+        if not breaker_result.changed:
+            await keno_tier_automation.evaluate_tier_transition(self._pool, reserve_balance=reserve_balance)
+        await self._refresh_tier_gauge()
         return _RoundContext(id=round_id, config=config, tier=tier, server_seed=server_seed, server_seed_hash=seed_hash)
 
-    async def _update_solvency_gauges(self) -> None:
+    async def _update_solvency_gauges(self) -> Decimal:
         """Two more previously-dead Prometheus gauges -- see the exposure
         -ratio one's own comment in keno_tickets.py for why these existed
         but were never .set() anywhere. Updated once per round (here, in
@@ -187,7 +198,9 @@ class KenoRoundEngine:
         in particular is a full account_balances SUM, not worth paying on
         every single ticket placement. Same two figures, same reasoning
         for keeping them structurally separate, as services/admin/
-        keno_queries.py::dashboard_summary_admin()'s own comment."""
+        keno_queries.py::dashboard_summary_admin()'s own comment. Returns
+        the reserve balance so the tier-automation call right after this
+        one doesn't have to read it a second time."""
         async with self._pool.acquire() as conn:
             reserve_account = await ledger.get_or_create_account(conn, None, "keno_reserve")
             reserve_balance = await ledger.balance(conn, reserve_account.id)
@@ -196,6 +209,17 @@ class KenoRoundEngine:
             )
         metrics.keno_reserve_balance.set(float(reserve_balance))
         metrics.keno_player_liability.set(float(liability))
+        return reserve_balance
+
+    async def _refresh_tier_gauge(self) -> None:
+        async with self._pool.acquire() as conn:
+            tier_number = await conn.fetchval(
+                "SELECT tiers.tier_number FROM keno_tier_state "
+                "JOIN keno_risk_tiers tiers ON tiers.id = keno_tier_state.current_tier_id "
+                "WHERE keno_tier_state.id = 1"
+            )
+        if tier_number is not None:
+            metrics.keno_current_tier_number.set(tier_number)
 
     async def _open_betting(self, ctx: _RoundContext) -> None:
         async with self._pool.acquire() as conn:

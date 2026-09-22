@@ -20,7 +20,7 @@ from typing import Any
 
 import asyncpg
 
-from packages.core import keno, keno_config, ledger
+from packages.core import keno, keno_config, ledger, metrics
 from services.admin import audit
 
 
@@ -316,12 +316,19 @@ async def set_current_tier_admin(
 ) -> dict[str, Any]:
     """Manual override of keno_tier_state (Part 7.2's promotion/demotion
     target) -- always available to a superadmin regardless of what the
-    (separately scheduled, not yet automated in this pass) reserve
-    -threshold evaluation would otherwise choose, the same "admin can
-    always directly act" precedent services/admin/queries.py's
-    void_round_admin/stop_room_admin already set for Bingo. Never affects
-    an in-flight round (Part 7.2: "never mid-round") -- rounds pin their
-    own tier_id at creation and never re-read this table again."""
+    automated reserve-threshold evaluation (packages/core/
+    keno_tier_automation.py, wired into KenoRoundEngine._create_round())
+    would otherwise choose, the same "admin can always directly act"
+    precedent services/admin/queries.py's void_round_admin/stop_room_admin
+    already set for Bingo -- the next automated evaluation simply resumes
+    from wherever this override left current_tier_id, same as it would
+    after any other change. Never affects an in-flight round (Part 7.2:
+    "never mid-round") -- rounds pin their own tier_id at creation and
+    never re-read this table again. Recorded in keno_tier_changes
+    (trigger='admin_override') alongside the existing admin_audit_log
+    entry -- the former is the one place with a full tier history
+    regardless of actor, the latter is admin_audit_log's own "which admin
+    did this" record specifically."""
     if not reason.strip():
         raise InvalidKenoConfig("reason is required")
     async with pool.acquire() as conn:
@@ -337,6 +344,19 @@ async def set_current_tier_admin(
                 "candidate_since = NULL, updated_at = now()",
                 tier_id,
             )
+            reserve_account = await ledger.get_or_create_account(conn, None, "keno_reserve")
+            reserve_balance = await ledger.balance(conn, reserve_account.id)
+            await conn.execute(
+                "INSERT INTO keno_tier_changes "
+                "(from_tier_id, to_tier_id, trigger, reason, reserve_balance_at_change, admin_id) "
+                "VALUES ($1, $2, 'admin_override', $3, $4, $5)",
+                before["current_tier_id"] if before else None,
+                tier_id,
+                reason,
+                reserve_balance,
+                admin_id,
+            )
+            metrics.keno_tier_changes_total.labels(trigger="admin_override").inc()
             await audit.record(
                 conn, admin_id=admin_id, action="keno.tier.set_current", target_type="keno_risk_tier",
                 target_id=str(tier_id),
