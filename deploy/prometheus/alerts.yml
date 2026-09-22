@@ -115,3 +115,39 @@ groups:
           severity: warning
         annotations:
           summary: "More than 5 Telebirr SMS messages failed to parse in the last 15 minutes -- possible format change or spam"
+
+      # Part 7 audit gap (DECISIONS.md, 2026-09-21): "no liability-near
+      # -cash alert, no exposure>80% alert." Both gauges themselves were
+      # also dead until this same pass (packages/core/keno_tickets.py and
+      # services/engine/keno_round_engine.py now .set() them for real --
+      # see those files' own comments).
+      - alert: KenoRoundExposureHigh
+        # ceiling = reserve_balance * max_round_exposure_pct (packages/
+        # core/keno_exposure.py) -- this round's own projected 99.9th
+        # -percentile payout is approaching what the reserve is actually
+        # allowed to risk on it. The literal "exposure>80%" threshold the
+        # audit named.
+        expr: keno_round_exposure_ratio > 0.8
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Current Keno round's projected exposure is above 80% of its ceiling"
+
+      - alert: KenoReserveDepleted
+        # keno_reserve is a dedicated pot (services/admin/keno_queries.py
+        # ::dashboard_summary_admin()'s own comment: deliberately kept
+        # structurally separate from player_liability, "conflating them
+        # is how operators misjudge solvency") -- <= 0 is the one
+        # threshold on it defensible without a real operator decision: the
+        # reserve can no longer fund a payout at all. A more sensitive
+        # early-warning ratio (e.g. against player_liability or a target
+        # float) needs that decision first, same restraint this file's
+        # own TelebirrEvidenceReconciliation comment already applies to
+        # an alert it deliberately left unimplemented pending a real
+        # signal -- don't fabricate a threshold with false precision.
+        expr: keno_reserve_balance <= 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Keno reserve balance has hit zero or gone negative -- cannot fund payouts"
