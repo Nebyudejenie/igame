@@ -315,3 +315,47 @@ async def test_reserve_withdraw_blocked_below_floor_returns_409_over_http(admin_
             json={"amount": str(balance + Decimal("1")), "reason": "should be blocked over http"},
         )
     assert response.status_code == 409
+
+
+# --- risk-of-ruin simulator (Part 7.4) --------------------------------------
+
+_SIM_MULTIPLIERS = {"1": "0.19", "2": "0.97", "3": "3.89", "4": "11.67", "5": "16.00"}
+
+
+def _sim_body(**overrides):
+    body = {
+        "starting_reserve": "40000", "daily_handle": "50000", "avg_stake": "20",
+        "pick_count": 5, "multipliers": _SIM_MULTIPLIERS, "jackpot_diversion_bps": 150,
+        "floor": "0", "days": 30, "num_simulations": 200, "rng_seed": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+async def test_simulate_risk_of_ruin_admin_matches_the_pure_function_directly() -> None:
+    result = keno_queries.simulate_risk_of_ruin_admin(**_sim_body())
+    assert "ending_reserve_mean" in result
+    assert "floor_breach_probability" in result
+    assert Decimal(result["ending_reserve_mean"]) > 0
+
+
+async def test_simulate_risk_of_ruin_admin_rejects_invalid_input() -> None:
+    with pytest.raises(keno_queries.InvalidKenoConfig):
+        keno_queries.simulate_risk_of_ruin_admin(**_sim_body(days=0))
+
+
+async def test_risk_of_ruin_endpoint_is_reachable_by_ops(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="ops")  # keno:manage includes ops
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{admin_server}/keno/risk-of-ruin", headers=headers, json=_sim_body())
+    assert response.status_code == 200, response.text
+    assert "floor_breach_probability" in response.json()
+
+
+async def test_risk_of_ruin_endpoint_rejects_invalid_input_with_422(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/keno/risk-of-ruin", headers=headers, json=_sim_body(num_simulations=0)
+        )
+    assert response.status_code == 422

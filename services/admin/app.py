@@ -1562,6 +1562,40 @@ async def preview_keno_paytable(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+class KenoRiskOfRuinRequest(BaseModel):
+    starting_reserve: str
+    daily_handle: str
+    avg_stake: str
+    pick_count: int
+    multipliers: dict[str, str]
+    jackpot_diversion_bps: int
+    floor: str
+    days: int
+    num_simulations: int
+    rng_seed: int | None = None
+
+
+@app.post("/keno/risk-of-ruin")
+async def simulate_keno_risk_of_ruin(
+    admin: Annotated[AdminSession, Depends(require("keno:manage"))],
+    body: KenoRiskOfRuinRequest,
+) -> dict[str, Any]:
+    """Part 7.4's risk-of-ruin simulator -- pure computation, nothing
+    persisted (same reasoning as the paytable preview right above: safe
+    for ops/superadmin to run repeatedly while comparing candidate
+    reserve/handle/paytable scenarios, nothing here ever moves real
+    money)."""
+    try:
+        return keno_queries.simulate_risk_of_ruin_admin(
+            starting_reserve=body.starting_reserve, daily_handle=body.daily_handle,
+            avg_stake=body.avg_stake, pick_count=body.pick_count, multipliers=body.multipliers,
+            jackpot_diversion_bps=body.jackpot_diversion_bps, floor=body.floor, days=body.days,
+            num_simulations=body.num_simulations, rng_seed=body.rng_seed,
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 class CreateKenoPaytableRequest(BaseModel):
     pick_count: int
     profile: str

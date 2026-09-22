@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import asyncpg
 
-from packages.core import keno, keno_config, ledger, metrics
+from packages.core import keno, keno_config, keno_risk_simulator, ledger, metrics
 from services.admin import audit
 
 
@@ -209,6 +209,59 @@ def preview_paytable_stats(pick_count: int, multipliers: dict[str, str]) -> dict
         "within_guardrail": within_guardrail,
         "rtp_floor": str(keno.RTP_FLOOR),
         "rtp_ceiling": str(keno.RTP_CEILING),
+    }
+
+
+def simulate_risk_of_ruin_admin(
+    *,
+    starting_reserve: str,
+    daily_handle: str,
+    avg_stake: str,
+    pick_count: int,
+    multipliers: dict[str, str],
+    jackpot_diversion_bps: int,
+    floor: str,
+    days: int,
+    num_simulations: int,
+    rng_seed: int | None = None,
+) -> dict[str, Any]:
+    """Part 7.4's risk-of-ruin simulator -- pure, no DB, same "compare a
+    hypothetical before committing to it" shape as preview_paytable_stats()
+    above: every input is admin-supplied, not read from the live system,
+    so comparing several candidate reserve/handle/paytable combinations
+    costs nothing but repeat calls. See packages.core.keno_risk_simulator's
+    own module docstring for the simulation methodology and for what
+    Part 7.4 also asks for (handle-per-deposit/session-length comparison)
+    that this deliberately does NOT cover -- no real player-behavior data
+    exists to ground those numbers in."""
+    try:
+        decimal_multipliers = {int(k): Decimal(v) for k, v in multipliers.items()}
+        result = keno_risk_simulator.simulate_risk_of_ruin(
+            starting_reserve=Decimal(starting_reserve),
+            daily_handle=Decimal(daily_handle),
+            avg_stake=Decimal(avg_stake),
+            pick_count=pick_count,
+            multipliers=decimal_multipliers,
+            jackpot_diversion_bps=jackpot_diversion_bps,
+            floor=Decimal(floor),
+            days=days,
+            num_simulations=num_simulations,
+            rng_seed=rng_seed,
+        )
+    except (InvalidOperation, ValueError, KeyError, keno_risk_simulator.InvalidSimulationInput) as exc:
+        raise InvalidKenoConfig(f"invalid simulation input: {exc}") from exc
+    return {
+        "days": result.days,
+        "num_simulations": result.num_simulations,
+        "starting_reserve": str(result.starting_reserve),
+        "floor": str(result.floor),
+        "ending_reserve_p10": str(result.ending_reserve_p10),
+        "ending_reserve_p50": str(result.ending_reserve_p50),
+        "ending_reserve_p90": str(result.ending_reserve_p90),
+        "ending_reserve_mean": str(result.ending_reserve_mean),
+        "worst_drawdown_mean": str(result.worst_drawdown_mean),
+        "worst_drawdown_max": str(result.worst_drawdown_max),
+        "floor_breach_probability": str(result.floor_breach_probability),
     }
 
 
