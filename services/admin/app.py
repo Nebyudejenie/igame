@@ -1488,6 +1488,60 @@ async def list_keno_paytables(
     return await keno_queries.list_paytables_admin(app.state.pool, pick_count=pick_count)
 
 
+class KenoReserveTransferRequest(BaseModel):
+    amount: str
+    reason: str
+
+
+@app.post("/keno/reserve/deposit")
+async def keno_reserve_deposit(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: KenoReserveTransferRequest,
+) -> dict[str, Any]:
+    """Part 7.1: 'keno_reserve -- funded by explicit operator deposit.'
+    Same superadmin-only tier as every other reserve/config-shaping
+    action -- this one moves real money, house_float to keno_reserve."""
+    _require_reason(body.reason)
+    try:
+        amount = Decimal(body.amount)
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="invalid_amount") from None
+    try:
+        return await keno_queries.deposit_to_reserve_admin(
+            app.state.pool, admin_id=admin.admin_id, amount=amount, reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/keno/reserve/withdraw")
+async def keno_reserve_withdraw(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: KenoReserveTransferRequest,
+) -> dict[str, Any]:
+    """Part 7.1's own withdrawal-floor rule: blocked (409, not 422 --
+    this is a real, well-formed request correctly refused by a business
+    rule, not invalid input) and audited either way, success or refusal,
+    by keno_queries.withdraw_from_reserve_admin() itself."""
+    _require_reason(body.reason)
+    try:
+        amount = Decimal(body.amount)
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="invalid_amount") from None
+    try:
+        return await keno_queries.withdraw_from_reserve_admin(
+            app.state.pool, admin_id=admin.admin_id, amount=amount, reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except keno_queries.ReserveWithdrawalBelowFloor as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 class PreviewKenoPaytableRequest(BaseModel):
     pick_count: int
     multipliers: dict[str, str]

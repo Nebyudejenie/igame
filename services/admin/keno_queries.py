@@ -15,6 +15,7 @@ re-reads "what's currently active" at round-creation time.
 from __future__ import annotations
 
 import json
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +27,20 @@ from services.admin import audit
 
 class InvalidKenoConfig(Exception):
     pass
+
+
+class ReserveWithdrawalBelowFloor(Exception):
+    """Part 7.1's own withdrawal-floor rule: 'the admin cannot withdraw
+    below a configurable reserve floor. Attempts are blocked and
+    audited' -- both halves of that sentence matter, so this is a typed
+    exception the caller can catch, not a generic InvalidKenoConfig,
+    and withdraw_from_reserve_admin() below audits the rejection itself,
+    not only successful withdrawals."""
+
+    def __init__(self, attempted_balance: Decimal, floor: Decimal) -> None:
+        self.attempted_balance = attempted_balance
+        self.floor = floor
+        super().__init__(f"withdrawal would leave reserve at {attempted_balance}, below floor {floor}")
 
 
 def _json_safe(row: asyncpg.Record | dict[str, Any]) -> dict[str, Any]:
@@ -402,3 +417,124 @@ async def dashboard_summary_admin(pool: asyncpg.Pool) -> dict[str, Any]:
         "jackpot_pool": str(jackpot_balance),
         "current_tier_number": current_tier["tier_number"] if current_tier else None,
     }
+
+
+# --- reserve deposit / withdrawal (Part 7.1) --------------------------------
+# "keno_reserve -- funded by explicit operator deposit... reduced by...
+# explicit withdrawals." Both kinds already existed in ledger_transactions'
+# own allowed-kinds check (keno_reserve_deposit/keno_reserve_withdrawal,
+# migrations/versions/a3f7c2e91b04_keno_core_schema.py) but nothing ever
+# posted either outside a test -- the audit's own #3 finding. house_float
+# is the counterparty both ways, the same real, existing account every
+# other operator-funded pool (payments, simulated players) already uses --
+# not a new concept.
+
+
+async def deposit_to_reserve_admin(
+    pool: asyncpg.Pool, *, admin_id: int, amount: Decimal, reason: str, ip_address: str | None = None
+) -> dict[str, Any]:
+    if not reason.strip():
+        raise InvalidKenoConfig("reason is required")
+    if amount <= 0:
+        raise InvalidKenoConfig("amount must be positive")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            reserve = await ledger.get_or_create_account(conn, None, "keno_reserve")
+            house_float = await ledger.get_or_create_account(conn, None, "house_float")
+            before = await ledger.balance(conn, reserve.id)
+            await ledger.post(
+                conn, "keno_reserve_deposit",
+                [ledger.Entry(house_float.id, -amount), ledger.Entry(reserve.id, amount)],
+                idempotency_key=f"admin-reserve-deposit-{uuid.uuid4()}", created_by=f"admin:{admin_id}",
+            )
+            after = before + amount
+            await audit.record(
+                conn, admin_id=admin_id, action="keno.reserve.deposit", target_type="keno_reserve",
+                target_id="keno_reserve", before={"balance": str(before)}, after={"balance": str(after)},
+                reason=reason, ip_address=ip_address,
+            )
+    return {"balance": str(after)}
+
+
+async def withdraw_from_reserve_admin(
+    pool: asyncpg.Pool, *, admin_id: int, amount: Decimal, reason: str, ip_address: str | None = None
+) -> dict[str, Any]:
+    """Blocks (and audits the blocked attempt itself, not just successful
+    withdrawals -- Part 7.1's own "Attempts are blocked and audited")
+    anything that would leave the reserve below the active config's own
+    reserve_withdrawal_floor. Never partial -- either the full requested
+    amount clears the floor or nothing moves."""
+    if not reason.strip():
+        raise InvalidKenoConfig("reason is required")
+    if amount <= 0:
+        raise InvalidKenoConfig("amount must be positive")
+
+    async def _locked_floor_check(conn: ledger.AsyncpgConnection) -> tuple[Decimal, Decimal, Decimal]:
+        """Row-locks the reserve account's own balance for the rest of
+        the caller's transaction (FOR UPDATE) so nothing else can move it
+        between this check and whatever the caller does next -- without
+        it, a concurrent payout/withdrawal landing between pass 1's check
+        below and pass 2's actual debit could let a withdrawal through
+        that the floor should have blocked. Returns (before,
+        resulting_balance, floor)."""
+        reserve = await ledger.get_or_create_account(conn, None, "keno_reserve")
+        await conn.execute("SELECT balance FROM account_balances WHERE account_id = $1 FOR UPDATE", reserve.id)
+        before = await ledger.balance(conn, reserve.id)
+        config = await keno_config.load_active_config(conn)
+        return before, before - amount, Decimal(config["reserve_withdrawal_floor"])
+
+    # Pass 1: the floor check, in its own transaction that commits either
+    # way -- raising ReserveWithdrawalBelowFloor from *inside* the same
+    # transaction as the audit.record() call would roll the audit row
+    # back right along with it, silently defeating Part 7.1's own
+    # "Attempts are blocked and audited" (a real bug this function's own
+    # tests caught: the exception WAS raised correctly, the balance WAS
+    # correctly left unchanged, but the audit row never existed).
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before, resulting_balance, floor = await _locked_floor_check(conn)
+            if resulting_balance < floor:
+                await audit.record(
+                    conn, admin_id=admin_id, action="keno.reserve.withdraw_rejected",
+                    target_type="keno_reserve", target_id="keno_reserve",
+                    before={"balance": str(before)},
+                    after={"attempted_balance": str(resulting_balance), "floor": str(floor)},
+                    reason=reason, ip_address=ip_address,
+                )
+    if resulting_balance < floor:
+        raise ReserveWithdrawalBelowFloor(resulting_balance, floor)
+
+    # Pass 2: the actual withdrawal, re-validating the floor with a fresh
+    # row-locked read rather than trusting pass 1's now-stale one --
+    # genuinely rare for an admin-driven action, but a real-money guard
+    # must not skip re-checking just because the gap is usually empty.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before, resulting_balance, floor = await _locked_floor_check(conn)
+            if resulting_balance < floor:
+                await audit.record(
+                    conn, admin_id=admin_id, action="keno.reserve.withdraw_rejected",
+                    target_type="keno_reserve", target_id="keno_reserve",
+                    before={"balance": str(before)},
+                    after={"attempted_balance": str(resulting_balance), "floor": str(floor)},
+                    reason=f"{reason} (blocked on re-check: balance changed since the initial check)",
+                    ip_address=ip_address,
+                )
+    if resulting_balance < floor:
+        raise ReserveWithdrawalBelowFloor(resulting_balance, floor)
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            reserve = await ledger.get_or_create_account(conn, None, "keno_reserve")
+            house_float = await ledger.get_or_create_account(conn, None, "house_float")
+            await ledger.post(
+                conn, "keno_reserve_withdrawal",
+                [ledger.Entry(reserve.id, -amount), ledger.Entry(house_float.id, amount)],
+                idempotency_key=f"admin-reserve-withdrawal-{uuid.uuid4()}", created_by=f"admin:{admin_id}",
+            )
+            await audit.record(
+                conn, admin_id=admin_id, action="keno.reserve.withdraw", target_type="keno_reserve",
+                target_id="keno_reserve", before={"balance": str(before)},
+                after={"balance": str(resulting_balance)}, reason=reason, ip_address=ip_address,
+            )
+    return {"balance": str(resulting_balance)}
