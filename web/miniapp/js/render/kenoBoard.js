@@ -53,6 +53,23 @@ export function setSelected(numbers) {
   }
 }
 
+// A small always-visible dot (bottom-left corner, distinct from the
+// existing top-right selected/matched badges so the two never overlap)
+// showing whether a number has come up often (hot) or rarely (cold) over
+// the recent-rounds lookback window -- reference: megachance.club's own
+// Fast Keno marks this directly on the live betting grid, not tucked into
+// a separate stats screen, so a player sees it at the exact moment it's
+// actionable (picking numbers), not after. Display-only, never affects
+// which numbers are pickable.
+export function setHotCold(hotNumbers, coldNumbers) {
+  const hot = new Set(hotNumbers || []);
+  const cold = new Set(coldNumbers || []);
+  for (const [number, cell] of cellsByNumber) {
+    cell.classList.toggle("hot", hot.has(number));
+    cell.classList.toggle("cold", !hot.has(number) && cold.has(number));
+  }
+}
+
 export function markDrawn(number) {
   const cell = cellsByNumber.get(number);
   if (!cell) return;

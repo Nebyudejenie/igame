@@ -519,8 +519,25 @@
       </div>
     </div>
 
+    <!-- Hero draw reveal -- hidden outside the drawing phase (toggled by
+         keno.js's own keno.draw.started/keno.betting.open handlers). One
+         big current-number ball, ringed like a real lottery draw, plus a
+         growing trail of already-drawn balls underneath (own matches
+         tinted gold) and a running "N / 20 drawn" progress label -- see
+         DECISIONS.md/PROGRESS.md for why this replaced the old flat
+         ball-strip-only reveal (a recorded reference platform's own Fast
+         Keno draw screen). -->
+    <div id="keno-hero-reveal" class="keno-hero-reveal hidden">
+      <div id="keno-hero-ball" class="keno-hero-ball"></div>
+      <div id="keno-draw-progress" class="keno-draw-progress"></div>
+    </div>
+
     <div id="keno-board-wrap" class="keno-board-wrap">
       <div id="keno-board"></div>
+      <!-- Shown only while no numbers are picked yet and betting is open
+           -- a friendlier first touch than a blank board, gone the
+           moment the first number is tapped. -->
+      <div id="keno-empty-hint" class="keno-empty-hint hidden"></div>
     </div>
 
     <div id="keno-recent-draws" class="keno-recent-draws"></div>
@@ -542,8 +559,14 @@
     </div>
 
     <div class="keno-payout-preview">
-      <span data-i18n="keno.potential_payout_label"></span>
-      <span id="keno-payout-amount">0.00 ETB</span>
+      <div class="keno-payout-preview-top">
+        <span data-i18n="keno.potential_payout_label"></span>
+        <span id="keno-payout-amount">0.00 ETB</span>
+      </div>
+      <!-- Live Match -> Pays rows for the current pick count -- filled by
+           renderPicksAndPayout() in keno.js, empty/hidden until at least
+           one number is picked. -->
+      <div id="keno-match-pays-rows" class="keno-match-pays-rows hidden"></div>
     </div>
 
     <button id="keno-play-btn" type="button" class="btn-primary btn-gold" data-i18n="keno.play_button" disabled></button>

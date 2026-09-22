@@ -205,7 +205,43 @@ function renderPicksAndPayout() {
   const potential = best && stake > 0 ? stake * best.multiplier : 0;
   el("keno-payout-amount").textContent = `${potential.toFixed(2)} ETB`;
 
+  renderMatchPaysRows();
+  renderEmptyHint();
   updatePlayEnabled();
+}
+
+// Live Match -> Pays preview (reference: a recorded competitor's Fast
+// Keno keeps this visible above the grid, recalculated as picks change,
+// rather than making a player open the full paytable modal to see what
+// their current selection is even worth). Shows the top two match tiers
+// for the current pick count -- the two a player is actually watching
+// for, not the whole table (that's what keno-paytable-btn's own modal
+// is for).
+function renderMatchPaysRows() {
+  const container = el("keno-match-pays-rows");
+  const table = currentRound && currentRound.paytable ? currentRound.paytable[String(selectedPicks.size)] : null;
+  if (!table || selectedPicks.size === 0) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+  const matchCounts = Object.keys(table).map(Number).sort((a, b) => b - a).slice(0, 2).reverse();
+  container.innerHTML = matchCounts
+    .map(
+      (m) =>
+        `<div class="keno-match-pays-row"><span>${t("keno.match_label")} ${m}</span><span>${t("keno.pays_label")} ×${table[String(m)]}</span></div>`
+    )
+    .join("");
+  container.classList.remove("hidden");
+}
+
+function renderEmptyHint() {
+  const hint = el("keno-empty-hint");
+  const showHint = currentRound && currentRound.status === "betting_open" && selectedPicks.size === 0;
+  hint.classList.toggle("hidden", !showHint);
+  if (showHint) {
+    hint.textContent = t("keno.empty_state_hint", { min: currentRound.min_picks, max: currentRound.max_picks });
+  }
 }
 
 function isSelectionPlayable() {
@@ -218,9 +254,27 @@ function isSelectionPlayable() {
   );
 }
 
+// Transient "WAIT..." label: shown only in the gap right after a ticket
+// was placed (board cleared for the next tap-tap-PLAY) and before the
+// player has picked anything new for a second ticket this same round --
+// reference: the same competitor platform's own BET button switches to
+// "WAIT..." the moment a bet is accepted. Zemen Game still allows a
+// second ticket immediately (unlike that reference), so this is cosmetic
+// acknowledgment, not a lock.
+function isAwaitingNextPick() {
+  return (
+    currentRound &&
+    currentRound.status === "betting_open" &&
+    selectedPicks.size === 0 &&
+    hasActiveBetThisRound()
+  );
+}
+
 function updatePlayEnabled() {
   const playable = isSelectionPlayable();
-  el("keno-play-btn").disabled = !playable;
+  const domBtn = el("keno-play-btn");
+  domBtn.disabled = !playable;
+  domBtn.textContent = isAwaitingNextPick() ? t("keno.play_button_waiting") : t("keno.play_button");
   if (tg && tg.MainButton) updateMainButton();
 }
 
@@ -234,7 +288,7 @@ function updateMainButton() {
   const domBtn = el("keno-play-btn");
   const playable = isSelectionPlayable();
   domBtn.classList.add("hidden");
-  tg.MainButton.setText(t("keno.play_button"));
+  tg.MainButton.setText(isAwaitingNextPick() ? t("keno.play_button_waiting") : t("keno.play_button"));
   if (tg.MainButton.setParams) {
     tg.MainButton.setParams({ color: "#FFC94A", text_color: "#1a1200" });
   }
@@ -359,12 +413,33 @@ function onNewRoundSnapshot() {
   board.setLocked(currentRound.status !== "betting_open");
   if (currentRound.status === "betting_open") {
     board.resetDraw();
+    // A fresh betting phase -- the previous round's hero reveal (if this
+    // client was open through settlement) is no longer relevant.
+    el("keno-hero-reveal").classList.add("hidden");
   }
   if (Array.isArray(currentRound.drawn_numbers)) {
     board.markAllDrawn(currentRound.drawn_numbers.slice(0, currentRound.reveal_index || 0));
   }
   renderPicksAndPayout();
   renderMyTickets(); // reflects whichever round is now current -- empty/hidden unless a ticket was already placed for it
+  refreshBoardHotCold();
+}
+
+// Hot/cold dots directly on the live betting grid (not just the History
+// tab's own separate hot/cold pane) -- fetched once per round via the
+// same event refreshState() already runs on, not on every WS frame,
+// since the 50-round lookback this reads barely moves within a single
+// round. Best-effort: a failure here just means the grid shows no dots
+// this round, never blocks picking or betting.
+async function refreshBoardHotCold() {
+  try {
+    const response = await fetch("/api/keno/rounds/hot-cold?lookback_rounds=50", { headers: authHeader() });
+    if (!response.ok) return;
+    const data = await response.json();
+    board.setHotCold(data.hottest, data.coldest);
+  } catch {
+    /* display-only curiosity -- see comment above */
+  }
 }
 
 function renderStakeChips() {
@@ -454,6 +529,15 @@ ws.on("keno.betting.closed", (msg) => {
   renderStatusPill();
   board.setLocked(true);
   updatePlayEnabled();
+  // renderEmptyHint() alone, not the full renderPicksAndPayout() -- the
+  // hint is status-gated (betting_open only) so it's the one piece of
+  // that render pass actually stale here; nothing else this event
+  // touches needs a fresh potential-payout/match-pays recompute. A real
+  // bug this redesign's own visual check caught: without this, a hint
+  // shown right after a ticket clears the board (selectedPicks back to
+  // 0) stayed on screen straight through the draw, never re-evaluated
+  // once status left betting_open.
+  renderEmptyHint();
 });
 
 ws.on("keno.draw.started", (msg) => {
@@ -464,6 +548,11 @@ ws.on("keno.draw.started", (msg) => {
   el("keno-recent-draws").innerHTML = "";
   el("keno-match-counter").classList.remove("hidden");
   el("keno-match-counter").textContent = t("keno.match_counter", { matches: 0 });
+  renderEmptyHint(); // safety net if keno.betting.closed was somehow missed -- see that handler's own comment
+  el("keno-hero-reveal").classList.remove("hidden");
+  el("keno-hero-ball").textContent = "";
+  el("keno-hero-ball").classList.remove("keno-hero-ball-pop");
+  el("keno-draw-progress").textContent = t("keno.draw_progress", { count: 0 });
 });
 
 let matchesSoFar = 0;
@@ -471,13 +560,29 @@ let matchesSoFar = 0;
 ws.on("keno.number.drawn", (msg) => {
   if (!roundIdMatches(msg)) return;
   board.markDrawn(msg.number);
+  const matched = selectedPicks.has(msg.number);
+
+  const heroBall = el("keno-hero-ball");
+  heroBall.textContent = String(msg.number);
+  heroBall.classList.toggle("matched", matched);
+  // Retrigger the pop animation on every draw, not just the first --
+  // removing then re-adding the class in the same frame wouldn't repaint,
+  // so force a reflow between the two (the standard, dependency-free way
+  // to restart a CSS animation on an already-animated element).
+  heroBall.classList.remove("keno-hero-ball-pop");
+  void heroBall.offsetWidth;
+  heroBall.classList.add("keno-hero-ball-pop");
+
+  el("keno-draw-progress").textContent = t("keno.draw_progress", { count: msg.index + 1 });
+
   const ball = document.createElement("div");
   ball.className = "keno-ball";
+  if (matched) ball.classList.add("matched");
   ball.textContent = String(msg.number);
   const trail = el("keno-recent-draws");
   trail.appendChild(ball);
   trail.scrollLeft = trail.scrollWidth;
-  if (selectedPicks.has(msg.number)) {
+  if (matched) {
     matchesSoFar += 1;
     el("keno-match-counter").textContent = t("keno.match_counter", { matches: matchesSoFar });
     haptics.mediumTap();
