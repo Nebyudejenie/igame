@@ -349,13 +349,40 @@ promtool, real test runs) — see each item's own commit for full detail:**
    generation — an early draft would have silently stopped seeing the
    rest of the ladder the moment any single tier was ever edited.
 
-**Still open on the Part 7 gate, unstarted:**
-- Part 15 admin tooling proper: a reserve deposit/withdraw *endpoint*
-  (the ledger transaction kinds and the withdrawal-floor rule both
-  already exist in schema/spec, nothing calls them), a risk-of-ruin
-  simulator (spec 7.4: N simulated days given reserve/handle/paytable,
-  report ending-reserve distribution, worst drawdown, floor-breach
-  probability — genuinely new, not wired to anything existing).
+6. Reserve deposit/withdraw admin endpoint (`services/admin/keno_
+   queries.py::deposit_to_reserve_admin`/`withdraw_from_reserve_admin`,
+   `POST /keno/reserve/{deposit,withdraw}`, `keno:configure`
+   -superadmin-only). New `keno_configs.reserve_withdrawal_floor`
+   column, default 0 (the spec calls the floor "configurable," never
+   states a number — a real non-zero floor is a business decision for
+   later). A real transaction-boundary bug caught by this work's own
+   tests: the withdrawal-floor rejection's own audit row was being
+   written inside the same transaction as the exception signaling the
+   rejection, so raising rolled the audit insert back right along with
+   it — "Attempts are... audited" was silently not true. Fixed (separate
+   already-committed transaction for the check+audit, then a fresh
+   row-locked re-check immediately before the real debit to close the
+   TOCTOU race that fix's own restructuring introduced).
+7. Risk-of-ruin simulator (`packages/core/keno_risk_simulator.py`,
+   `POST /keno/risk-of-ruin`, `keno:manage`). Monte Carlo across
+   simulation runs and days; each day's own aggregate payout uses the
+   same Central Limit Theorem approximation `keno_exposure.py` already
+   established and documented for round-level exposure, applied one
+   level up — no numpy in this project, and simulating every individual
+   ticket across hundreds of days and thousands of runs would be tens of
+   millions of draws for an occasional planning tool. Verified directly
+   before wiring in: realistic launch-scale inputs show ~0% ruin
+   probability (correct — strong CLT diversification against a genuine
+   18% house edge), a deliberately thin/low-volume scenario shows real,
+   nonzero ruin probability and drawdown, proving the mechanism actually
+   responds rather than always reporting zero. Deliberately does NOT
+   cover the rest of Part 7.4 (median session length, handle-per-deposit
+   paytable comparison) — no real player-behavior data exists for Keno
+   to ground those numbers in, and this codebase's own discipline
+   already refuses to fabricate that kind of assumption (see
+   SantimPay/ArifPay). Flagged, not silently missing.
+
+**Still open on the Part 7 gate:**
 - Part 17: chaos/load testing, entirely unstarted.
 - `scripts/verify-round.ts` and 11 of 12 required `docs/keno/*.md` files
   (only this one and `00-discovery.md` exist).
@@ -368,7 +395,5 @@ promtool, real test runs) — see each item's own commit for full detail:**
   everything else is, not something that follows automatically from
   finishing the checklist above.
 
-**Next step**: operator to choose between the remaining admin-tooling
-work (reserve deposit/withdraw + risk-of-ruin simulator — the last
-pieces with real engineering content), Part 17 chaos/load testing, or
-the docs backlog — all three are open and none blocks the others.
+**Next step**: Part 17 chaos/load testing, or the docs backlog — both
+are open and neither blocks the other.
