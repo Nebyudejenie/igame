@@ -280,6 +280,15 @@ async def _place_ticket(
             )
             if not exposure_check.allowed:
                 raise RoundCapacityReached(str(exposure_check.projected_exposure))
+            # A real, previously-dead Prometheus gauge (spec 10.4's own
+            # "no liability-near-cash alert, no exposure>80% alert" gap
+            # traces back to this never being .set() anywhere) -- ceiling
+            # is reserve_balance * max_round_exposure_pct, genuinely zero
+            # before the reserve is ever funded, so guarded rather than a
+            # ZeroDivisionError taking down a real ticket placement over a
+            # metrics update.
+            if exposure_check.ceiling > 0:
+                metrics.keno_round_exposure_ratio.set(float(exposure_check.projected_exposure / exposure_check.ceiling))
 
             user_accumulators = await conn.fetchrow(
                 "SELECT COALESCE(SUM(expected_payout_contribution), 0) AS expected, "

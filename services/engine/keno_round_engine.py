@@ -175,7 +175,27 @@ class KenoRoundEngine:
                 )
                 await self._record_event(conn, round_id, None, "scheduled")
         metrics.keno_rounds_created_total.inc()
+        await self._update_solvency_gauges()
         return _RoundContext(id=round_id, config=config, tier=tier, server_seed=server_seed, server_seed_hash=seed_hash)
+
+    async def _update_solvency_gauges(self) -> None:
+        """Two more previously-dead Prometheus gauges -- see the exposure
+        -ratio one's own comment in keno_tickets.py for why these existed
+        but were never .set() anywhere. Updated once per round (here, in
+        _create_round()) rather than per-ticket: both are whole-system
+        figures that don't need sub-round freshness, and player_liability
+        in particular is a full account_balances SUM, not worth paying on
+        every single ticket placement. Same two figures, same reasoning
+        for keeping them structurally separate, as services/admin/
+        keno_queries.py::dashboard_summary_admin()'s own comment."""
+        async with self._pool.acquire() as conn:
+            reserve_account = await ledger.get_or_create_account(conn, None, "keno_reserve")
+            reserve_balance = await ledger.balance(conn, reserve_account.id)
+            liability = await conn.fetchval(
+                "SELECT COALESCE(SUM(balance), 0) FROM account_balances WHERE kind IN ('user_cash', 'user_bonus')"
+            )
+        metrics.keno_reserve_balance.set(float(reserve_balance))
+        metrics.keno_player_liability.set(float(liability))
 
     async def _open_betting(self, ctx: _RoundContext) -> None:
         async with self._pool.acquire() as conn:
