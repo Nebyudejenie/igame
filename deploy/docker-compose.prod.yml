@@ -8,12 +8,16 @@ name: jobingo-prod
 # deploy/docker-compose.yml is.
 #
 # This server has no public IP of its own -- cloudflared is the only
-# ingress path in, tunnelling app./admin./pay./bot.arada.fun to the
-# gateway/admin/payments/bot containers by their plain Compose service
+# ingress path in, tunnelling arada.click/payments.arada.click/agent.
+# arada.click/admin.arada.click/finance.arada.click/sms.arada.click to the
+# gateway/payments/admin/bot/sms containers by their plain Compose service
 # name (see deploy/cloudflared/config.yml.example and README.md's "Domain
-# and Cloudflare Tunnel" section for the one-time setup). engine-worker/
-# payout-worker are never tunnelled -- their /metrics ports are for
-# internal Prometheus scraping only, not public traffic.
+# and Cloudflare Tunnel" section for the one-time setup). This is a
+# genuinely separate deployment from the original arada.fun one -- see
+# that same README section for why the two use different cloudflared
+# architectures (this one containerized, arada.fun's host-level). engine-
+# worker/payout-worker are never tunnelled -- their /metrics ports are
+# for internal Prometheus scraping only, not public traffic.
 #
 # Needs a real .env file next to this one (never committed -- see
 # .env.prod.example for every variable this reads, and README.md's
@@ -229,23 +233,22 @@ services:
     depends_on: *app-depends-on
     command: ["python", "-m", "packages.core.reconcile_job"]
 
-  # STALE, per docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md (2026-09-05,
-  # re-confirmed after a real routing outage on 2026-09-14, see
-  # DECISIONS.md): production does NOT run cloudflared as a container.
-  # It runs as a host-level systemd service, forwarding into a separate
-  # Traefik instance (a different, shared stack on the same host, not
-  # tracked in this repository) that does the real per-hostname routing.
-  # This service definition is not what's actually deployed -- don't
-  # assume `docker compose ... restart cloudflared` or editing
-  # ./cloudflared/config.yml does anything to real production traffic.
-  # Kept only for a possible future containerized-cloudflared migration;
-  # see deploy/cloudflared/config.yml.example's own header before
-  # touching this. Routing rules would live in config.yml (see
-  # deploy/cloudflared/config.yml.example), never in the Cloudflare
-  # dashboard -- both files, and the tunnel's own credentials, are real
-  # secrets and deliberately gitignored like deploy/.env; README.md's
-  # "Domain and Cloudflare Tunnel" section has the one-time setup that
-  # creates them.
+  # REAL for the arada.click / Zemen Game deployment -- containerized
+  # cloudflared, routing straight to each Compose service below by its
+  # plain service name, per deploy/cloudflared/config.yml.example. This is
+  # NOT how the original arada.fun deployment works (that one runs
+  # cloudflared as a host-level systemd service forwarding into a
+  # separate, untracked Traefik stack -- see README.md's "Domain and
+  # Cloudflare Tunnel" section for why the two deployments deliberately
+  # differ here: a 2026-09-14 incident on arada.fun found Traefik routers
+  # that had silently disappeared with no version-controlled copy to
+  # recover from, see DECISIONS.md, and this deployment closes that gap by
+  # keeping all routing in this one committed file instead). Routing rules
+  # live in config.yml (copied from deploy/cloudflared/config.yml.example,
+  # never in the Cloudflare dashboard) -- that file, and the tunnel's own
+  # credentials, are real secrets and deliberately gitignored like
+  # deploy/.env; README.md's "Domain and Cloudflare Tunnel" section has
+  # the one-time setup that creates them.
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped

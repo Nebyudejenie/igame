@@ -10,7 +10,10 @@ still described as "Start Jo Bingo" -- an earlier product name, never
 updated when the product became Arada Bingo. This is the durable,
 version-controlled source of truth for that metadata going forward, so a
 future token rotation or fresh bot doesn't silently lose it again the
-way it evidently already has once.
+way it evidently already has once -- now on its second rebrand (Arada
+Bingo -> Zemen Game, 2026-09-22), the exact class of drift this file
+exists to prevent, so the lesson applies again rather than being a
+one-off.
 
 Bilingual by the same convention as everywhere else in this codebase
 (services/bot/locales/*.json): a "" (default, shown to any user whose
@@ -47,19 +50,19 @@ TARGET_SHORT_DESCRIPTION: dict[str, str] = {
 
 TARGET_DESCRIPTION: dict[str, str] = {
     "": (
-        "Arada Bingo — Ethiopia's live multiplayer Bingo on Telegram. Join a room, grab a "
+        "Zemen Game — Ethiopia's live multiplayer Bingo on Telegram. Join a room, grab a "
         "card, and play real-money Bingo with real players right now. Fast rounds, instant "
         "Telebirr & Chapa deposits/withdrawals, and every draw is provably fair. Tap Start "
         "— no app download needed."
     ),
     "en": (
-        "Arada Bingo — Ethiopia's live multiplayer Bingo on Telegram. Join a room, grab a "
+        "Zemen Game — Ethiopia's live multiplayer Bingo on Telegram. Join a room, grab a "
         "card, and play real-money Bingo with real players right now. Fast rounds, instant "
         "Telebirr & Chapa deposits/withdrawals, and every draw is provably fair. Tap Start "
         "— no app download needed."
     ),
     "am": (
-        "አራዳ ቢንጎ — የኢትዮጵያ ቀጥታ የብዙ ተጫዋቾች ቢንጎ በቴሌግራም። ክፍል ይቀላቀሉ፣ ካርድ ይያዙ፣ በገንዘብ ከሌሎች "
+        "ዘመን ጌም — የኢትዮጵያ ቀጥታ የብዙ ተጫዋቾች ቢንጎ በቴሌግራም። ክፍል ይቀላቀሉ፣ ካርድ ይያዙ፣ በገንዘብ ከሌሎች "
         "ተጫዋቾች ጋር አሁኑኑ ይጫወቱ። ፈጣን ዙሮች፣ ፈጣን በቴሌብር እና ቻፓ ገቢ/ወጪ፣ እያንዳንዱ ዕጣ በትክክል ፍትሃዊ "
         "መሆኑ ይረጋገጣል። ለመጀመር ጀምር የሚለውን ይንኩ — መተግበሪያ ማውረድ አያስፈልግም።"
     ),
@@ -68,7 +71,7 @@ TARGET_DESCRIPTION: dict[str, str] = {
 # The "" (default) command set doubles as the English one, same reasoning
 # TARGET_SHORT_DESCRIPTION/TARGET_DESCRIPTION use "" for.
 TARGET_COMMANDS_EN: list[tuple[str, str]] = [
-    ("start", "Start Arada Bingo"),
+    ("start", "Start Zemen Game"),
     ("play", "Open game"),
     ("balance", "Check balance"),
     ("history", "Game history"),
@@ -82,7 +85,7 @@ TARGET_COMMANDS_EN: list[tuple[str, str]] = [
 ]
 
 TARGET_COMMANDS_AM: list[tuple[str, str]] = [
-    ("start", "አራዳ ቢንጎን ጀምር"),
+    ("start", "ዘመን ጌምን ጀምር"),
     ("play", "ጨዋታ ክፈት"),
     ("balance", "ቀሪ ሂሳብ ይመልከቱ"),
     ("history", "የጨዋታ ታሪክ"),

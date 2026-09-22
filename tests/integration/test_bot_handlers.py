@@ -1258,7 +1258,7 @@ async def test_support_command_sends_the_support_contact(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, "/support"))
     await _settle()
     assert len(session.sent) == 1
-    assert "@AradaBingo_Support" in session.sent[0].text
+    assert "@ZemenGame_Support" in session.sent[0].text
 
 
 async def test_support_button_press_sends_the_support_contact(bot_ctx):
@@ -1274,7 +1274,7 @@ async def test_support_button_press_sends_the_support_contact(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, button_text))
     await _settle()
     assert len(session.sent) == 1
-    assert "@AradaBingo_Support" in session.sent[0].text
+    assert "@ZemenGame_Support" in session.sent[0].text
 
 
 async def test_stale_cached_keyboard_play_and_withdraw_button_text_still_routes(bot_ctx):
@@ -1415,7 +1415,7 @@ async def test_photo_attaches_to_the_players_most_recent_pending_manual_deposit(
 
     destination_row = await conn.fetchrow(
         "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
-        "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id"
+        "VALUES ('telebirr', '0911000000', 'Zemen Game PLC') RETURNING id"
     )
     intent = await manual.create_manual_deposit_request(
         pool,

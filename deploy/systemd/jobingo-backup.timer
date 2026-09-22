@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Arada Bingo logical backup
+Description=Daily Zemen Game logical backup
 
 [Timer]
 # Daily at 02:00 host time -- outside typical peak play hours; adjust to

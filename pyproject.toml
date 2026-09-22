@@ -1,7 +1,7 @@
 [project]
 name = "jobingo"
 version = "0.1.0"
-description = "Arada Bingo -- real-money multiplayer bingo on Telegram"
+description = "Zemen Game -- real-money multiplayer bingo on Telegram"
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.29",

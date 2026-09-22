@@ -39,7 +39,7 @@ in `docs/TELEBIRR_SMS_OPERATIONS_GUIDE.md` (section references given).
 
 ## C. Recipient configuration (real, not example data)
 
-- [ ] The real Arada Bingo Telebirr receiving account is known: full
+- [ ] The real Zemen Game Telebirr receiving account is known: full
       account name **exactly** as Telebirr's own SMS states it, and the
       full (unmasked) phone number.
 - [ ] Added via admin console → Payment Destinations → Add destination,

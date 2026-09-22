@@ -11,20 +11,20 @@ from aiogram.types import MenuButtonDefault, MenuButtonWebApp, User, WebAppInfo
 from packages.core.config import Settings
 from services.bot.verify_menu_button import _run
 
-MINIAPP_URL = "https://app.arada.fun"
+MINIAPP_URL = "https://arada.click"
 
 
 def _settings(**overrides: object) -> Settings:
     kwargs: dict[str, object] = dict(
-        telegram_bot_token="fake-token", telegram_bot_username="aradabbot", miniapp_url=MINIAPP_URL
+        telegram_bot_token="fake-token", telegram_bot_username="zemengamebot", miniapp_url=MINIAPP_URL
     )
     kwargs.update(overrides)
     return Settings(**kwargs)  # type: ignore[arg-type]
 
 
-def _fake_bot(*, username: str = "aradabbot", menu_button: object) -> AsyncMock:
+def _fake_bot(*, username: str = "zemengamebot", menu_button: object) -> AsyncMock:
     bot = AsyncMock()
-    bot.get_me.return_value = User(id=8988277728, is_bot=True, first_name="Arada Bingo", username=username)
+    bot.get_me.return_value = User(id=8988277728, is_bot=True, first_name="Zemen Game", username=username)
     bot.get_chat_menu_button.return_value = menu_button
     return bot
 

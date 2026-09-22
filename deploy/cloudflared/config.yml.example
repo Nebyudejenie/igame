@@ -1,70 +1,98 @@
-# SUPERSEDED -- this file describes a direct cloudflared-in-Docker
-# architecture (one hostname per Compose service name, `pay.arada.fun`
-# not `payments.arada.fun`) that docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md
-# explicitly confirmed, after checking the live production host on
-# 2026-09-05, "was never actually implemented." Production instead runs
-# cloudflared as a host-level systemd service
-# (/etc/systemd/system/cloudflared.service,
-# /etc/cloudflared/config.yml -- NOT this repo's deploy/docker-compose.
-# prod.yml `cloudflared` service, which is also stale for the same
-# reason and should not be assumed to be what's actually running) that
-# forwards to a Traefik instance on the same host (part of a separate,
-# shared "hermis" stack, not tracked in this repository at all), which
-# does the real per-hostname routing to gateway/admin/payments/bot by
-# Host() rule. The real, verified hostnames are `payments.arada.fun`,
-# `agent.arada.fun`, `admin.arada.fun`, `finance.arada.fun` (all real
-# subdomains, not `pay.`/`bot.`/`sms.` as below) -- see that doc for the
-# full real architecture diagram, and DECISIONS.md's 2026-09-14 entry for
-# a real outage where all four of those routers were found to have
-# silently disappeared from the (untracked, host-only) Traefik config
-# with zero trace in version control to recover from, which is the
-# entire reason this warning exists: don't debug from this file, and
-# don't assume restoring it fixes anything in production.
+# Zemen Game / arada.click -- this deployment's REAL, live ingress config,
+# not an aspirational one. This is a genuinely different server from the
+# original Arada Bingo / arada.fun deployment (see README.md's "Domain and
+# Cloudflare Tunnel" section for that deployment's own, separate, host
+# -level-cloudflared-plus-external-Traefik architecture, which this file
+# does not describe and is not a replacement for).
 #
-# Kept in the repo only in case a *future*, genuinely containerized
-# cloudflared deployment is deliberately adopted -- if so, update the
-# hostnames below to match the real scheme first (this file's own
-# `pay.arada.fun`/`bot.arada.fun`/`sms.arada.fun` do not match what's
-# actually live). Copy to deploy/cloudflared/config.yml and fill in the
-# real tunnel id -- never committed (see .gitignore). README.md's "Domain
-# and Cloudflare Tunnel" section has the one-time setup this file is the
-# last step of: installing cloudflared, `cloudflared tunnel login`,
-# `cloudflared tunnel create jobingo` (prints the tunnel id and writes
-# the credentials JSON this file's credentials-file line points at), and
-# `cloudflared tunnel route dns jobingo <hostname>` once per subdomain
-# below (creates the real DNS records -- nothing to click together in
-# the Cloudflare dashboard).
+# For THIS server, cloudflared runs as one of this repo's own Docker
+# containers (deploy/docker-compose.prod.yml's `cloudflared` service),
+# routing straight to each Compose service by its plain service name --
+# no separate, untracked Traefik stack in the loop. This is a deliberate
+# choice, not an oversight: the arada.fun deployment's real Traefik config
+# lives entirely outside git on that host, and a 2026-09-14 incident (see
+# DECISIONS.md) found four of its routers had silently disappeared with
+# zero version-controlled copy to recover from. Routing this deployment
+# entirely through this one committed file closes that exact gap for
+# arada.click from day one.
 #
-# Ingress rules are evaluated top to bottom; the first matching hostname
-# wins, and the final catch-all is required by cloudflared itself, matched
-# only when no hostname above it matched. Every service: value is a plain
-# Docker Compose service name -- reachable by that name only from inside
-# this stack's own network, exactly how gateway/admin/payments/bot already
-# reach postgres/redis today.
+# The hostname *pattern* below still mirrors arada.fun's real, live
+# scheme (docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md) rather than the
+# never-implemented app./admin./pay./bot./sms. scheme this file used to
+# describe: one apex hostname carries both the Mini App/gateway and the
+# Telegram webhook (split by path, the same way arada.fun's Traefik does
+# it with a PathPrefix rule -- cloudflared's own ingress rules support the
+# same hostname+path combination directly, no Traefik needed to reproduce
+# it), and payments/admin each answer on two hostnames apiece for the
+# same underlying container (agent portal shares the payments container,
+# finance shares the admin container -- see that doc's "Why payments/
+# agent and admin/finance are the same containers, twice").
+#
+# Copy to deploy/cloudflared/config.yml (gitignored, like deploy/.env) and
+# fill in the real tunnel id. One-time setup, on the arada.click server
+# itself (README.md's "Domain and Cloudflare Tunnel" section has the full
+# walkthrough):
+#   1. Install the cloudflared CLI.
+#   2. `cloudflared tunnel login` -- authorizes against the Cloudflare
+#      account arada.click's DNS is managed under.
+#   3. `cloudflared tunnel create zemen-game` -- creates the tunnel,
+#      prints its id, and writes a credentials JSON file; copy that file
+#      to deploy/cloudflared/tunnel-credentials.json (gitignored).
+#   4. `cloudflared tunnel route dns zemen-game <hostname>`, once per
+#      hostname below (arada.click, www.arada.click, payments.arada.click,
+#      agent.arada.click, admin.arada.click, finance.arada.click,
+#      sms.arada.click) -- this is what actually creates the DNS records;
+#      arada.click is on Cloudflare DNS, so every one of these is just a
+#      new record under the same zone, no extra domain purchase needed.
+#   5. Replace <TUNNEL_ID> below with the id step 3 printed.
+#
+# Ingress rules are evaluated top to bottom; the first matching rule wins
+# (hostname alone, or hostname+path together), and the final catch-all is
+# required by cloudflared itself. Every `service:` value is a plain Docker
+# Compose service name, reachable only from inside this stack's own
+# network -- exactly how gateway/admin/payments/bot already reach
+# postgres/redis today.
 
 tunnel: <TUNNEL_ID>
 credentials-file: /etc/cloudflared/tunnel-credentials.json
 
 ingress:
-  # Mini App static files, player REST API, and the game WebSocket.
-  - hostname: app.arada.fun
+  # Telegram's webhook (POST /webhook) -- checked before the catch-all
+  # gateway rule below since both share the apex hostname. PUBLIC_BASE_URL
+  # must be exactly https://arada.click for this to match what bot.py
+  # registers with Telegram.
+  - hostname: arada.click
+    path: ^/webhook$
+    service: http://bot:8003
+  # Mini App static files, player REST API, and the game WebSocket --
+  # everything else on the apex hostname.
+  - hostname: arada.click
     service: http://gateway:8000
-  # Admin console -- IP-allowlisted at the application layer
-  # (ADMIN_IP_ALLOWLIST) regardless of this subdomain being public;
-  # the allowlist is the real boundary, not the hostname.
-  - hostname: admin.arada.fun
-    service: http://admin:8001
+  - hostname: www.arada.click
+    service: http://gateway:8000
   # Chapa's real server-to-server webhook (POST /webhooks/chapa) --
   # PAYMENTS_PUBLIC_BASE_URL must match this exact hostname.
-  - hostname: pay.arada.fun
+  - hostname: payments.arada.click
     service: http://payments:8002
-  # Telegram's webhook (POST /webhook) -- PUBLIC_BASE_URL must match
-  # this exact hostname.
-  - hostname: bot.arada.fun
-    service: http://bot:8003
+  # Payment Agent Portal -- same container as payments.arada.click, a
+  # second hostname for the same service (see docs/AGENT_DASHBOARD_
+  # GUIDE.md). AGENT_PORTAL_BASE_URL must match this exact hostname.
+  - hostname: agent.arada.click
+    service: http://payments:8002
+  # Admin console -- IP-allowlisted at the application layer
+  # (ADMIN_IP_ALLOWLIST) regardless of this subdomain being public; the
+  # allowlist is the real boundary, not the hostname. Trusts Cloudflare's
+  # own CF-Connecting-IP header at the edge, same as arada.fun.
+  - hostname: admin.arada.click
+    service: http://admin:8001
+  # Finance role -- same container as admin.arada.click, a second
+  # hostname for the same service ("finance" is an admin_users.role, not
+  # a separate app).
+  - hostname: finance.arada.click
+    service: http://admin:8001
   # Enterprise SMS Control Plane -- a separate product/console, its own
   # admin login page at /console (same admin_users accounts as
-  # admin.arada.fun; see DECISIONS.md 2026-09-07).
-  - hostname: sms.arada.fun
+  # admin.arada.click; see DECISIONS.md 2026-09-07).
+  - hostname: sms.arada.click
     service: http://sms:8006
   - service: http_status:404

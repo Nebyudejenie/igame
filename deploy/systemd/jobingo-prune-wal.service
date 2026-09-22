@@ -1,5 +1,5 @@
 [Unit]
-Description=Arada Bingo WAL archive / basebackup retention pruning (deploy/prune_wal_archive.sh)
+Description=Zemen Game WAL archive / basebackup retention pruning (deploy/prune_wal_archive.sh)
 Wants=network-online.target
 After=network-online.target docker.service
 

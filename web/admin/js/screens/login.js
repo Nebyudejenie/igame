@@ -3,7 +3,7 @@ import { api, setToken, setRole } from "../api.js";
 export function render(container, onSuccess) {
   container.innerHTML = `
     <div class="login-card">
-      <h1>Arada Bingo Admin</h1>
+      <h1>Zemen Game Admin</h1>
       <form id="login-form">
         <label>Username
           <input type="text" name="username" required autocomplete="username" autofocus />

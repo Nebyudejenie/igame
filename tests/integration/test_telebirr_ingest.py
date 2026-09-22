@@ -192,7 +192,7 @@ async def test_unparseable_message_persists_no_row(pool, conn):
 # --- the "transferred" template: recipient + phone cross-validation -------
 # (CTO directive sections 4/13/27 -- "SMS direction check" / "wrong
 # recipient test": a valid reference and amount are never sufficient on
-# their own, the money must also have gone TO the configured Arada Bingo
+# their own, the money must also have gone TO the configured Zemen Game
 # destination.)
 
 

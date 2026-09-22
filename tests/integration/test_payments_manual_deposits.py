@@ -30,7 +30,7 @@ async def _active_destination(conn) -> int:
     row = await conn.fetchrow(
         """
         INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, instructions)
-        VALUES ('telebirr', '0911000000', 'Arada Bingo PLC', 'Send exactly the requested amount')
+        VALUES ('telebirr', '0911000000', 'Zemen Game PLC', 'Send exactly the requested amount')
         RETURNING id
         """
     )

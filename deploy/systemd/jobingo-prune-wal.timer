@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Arada Bingo WAL/basebackup retention pruning
+Description=Daily Zemen Game WAL/basebackup retention pruning
 
 [Timer]
 # Daily, after the backup/basebackup windows above -- pruning before a

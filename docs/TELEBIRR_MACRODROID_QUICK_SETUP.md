@@ -143,7 +143,7 @@ own verification. Sending anything less will fail.
 | You see | Meaning | What to do |
 |---|---|---|
 | HTTP 200, `"status": "ingested_available"` | Success — recipient matched, ready for a player to redeem. | Nothing — working as intended. |
-| HTTP 200, `"status": "ingested_rejected"` | The SMS parsed fine, but its recipient doesn't match the configured Arada Bingo account. | Tell an admin — likely the recipient isn't configured yet, or this SMS is for a different account entirely. |
+| HTTP 200, `"status": "ingested_rejected"` | The SMS parsed fine, but its recipient doesn't match the configured Zemen Game account. | Tell an admin — likely the recipient isn't configured yet, or this SMS is for a different account entirely. |
 | HTTP 200, `"status": "duplicate"` | This exact SMS was already ingested. | Nothing — this is safe and expected if the macro somehow fires twice for one message. |
 | HTTP 200, `"status": "unparseable"` | The server couldn't read a reference from this message at all. | Check the SMS is a real Telebirr payment confirmation, not something else that happened to contain the trigger phrase. |
 | HTTP 401, `"invalid bearer token"` | Wrong or missing bearer token. | Double check the `Authorization` header value for typos/extra spaces; confirm the token hasn't been rotated (ask an admin). |

@@ -1,10 +1,10 @@
 {
-  "welcome.new_user": "Welcome to Arada Bingo! Please register to continue.",
+  "welcome.new_user": "Welcome to Zemen Game! Please register to continue.",
   "welcome.back": "Welcome back, {name}!",
 
   "register.button": "📝 Register",
   "register.instructions_button": "📖 Instructions",
-  "register.prompt": "Arada Bingo is for players 18 and older only. Share your phone number to register -- doing so confirms you are at least 18 years old.",
+  "register.prompt": "Zemen Game is for players 18 and older only. Share your phone number to register -- doing so confirms you are at least 18 years old.",
   "register.use_button": "Please use the 'Share Phone Number' button.",
   "register.contact_mismatch": "That's not your own phone number. Please share only your own contact.",
   "register.invalid_phone": "That doesn't look like a valid Ethiopian phone number. Please try again.",
@@ -59,7 +59,7 @@
   "limits.loss_set_pending": "Your daily loss limit will increase to {amount} ETB in 24 hours. Until then, your current limit still applies.",
   "limits.cooloff_invalid_duration": "Please choose a cool-off period: 24h, 7d, or 30d.",
   "limits.cooloff_set": "You're taking a break. Play, deposits, and withdrawals are paused for {hours} hours.",
-  "limits.selfexclude_confirm": "This will exclude you from Arada Bingo for at least 6 months and cannot be undone. To confirm, send: /limits selfexclude confirm",
+  "limits.selfexclude_confirm": "This will exclude you from Zemen Game for at least 6 months and cannot be undone. To confirm, send: /limits selfexclude confirm",
   "limits.selfexclude_done": "You have been self-excluded for at least {days} days. If you need support, see /support.",
 
   "history.header": "Your recent game and money activity:",
@@ -72,8 +72,8 @@
   "invite.summary": "Your invite link:\n{link}\n\n{count} people have joined so far.",
   "invite.no_username": "Your invite link isn't ready yet. Please try again shortly.",
 
-  "support.info": "Need help? Please reach out to @AradaBingo_Support.",
-  "rules.text": "75-ball Arada Bingo: pick a card, mark it as numbers are called, and call BINGO when you complete a row, column, diagonal, or the four corners. The derash is what's left of the pot after the operator's cut.",
+  "support.info": "Need help? Please reach out to @ZemenGame_Support.",
+  "rules.text": "75-ball Bingo on Zemen Game: pick a card, mark it as numbers are called, and call BINGO when you complete a row, column, diagonal, or the four corners. The derash is what's left of the pot after the operator's cut.",
 
   "language.prompt": "Choose your language:",
   "language.set": "Your language has been set to English.",

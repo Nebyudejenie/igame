@@ -1,4 +1,4 @@
-# Arada Bingo
+# Zemen Game
 
 **github.com/Nebyudejenie/igame is the only active repository as of
 2026-09-21.** `~/AradaBingo` (github.com/Nebyudejenie/game) is archived,
@@ -239,81 +239,100 @@ ingress path onto a Proxmox VM with no public IP of its own.
 
 ### Domain and Cloudflare Tunnel
 
-**This section describes an aborted design, not what's actually
-deployed.** `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` confirmed directly
-against the live host on 2026-09-05 that the below (cloudflared running
-as one of this repo's own Docker containers, routing straight to each
-Compose service name) "was never actually implemented." **Read that file
-for the real architecture** before touching any tunnel/routing config —
-the summary: `cloudflared` runs as a **host-level systemd service**
-(outside Docker, outside this repo) forwarding into a **Traefik**
-instance from a separate, shared stack on the same host (also outside
-this repo), which does the real per-hostname routing. The real, live
+**Two separate production deployments exist, on two different servers,
+each with its own domain and its own cloudflared architecture. Don't
+conflate them.**
+
+#### arada.fun (original deployment — unaffected by the Zemen Game rebrand)
+
+`docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` confirmed directly against the
+live host on 2026-09-05: `cloudflared` runs as a **host-level systemd
+service** (outside Docker, outside this repo) forwarding into a
+**Traefik** instance from a separate, shared stack on the same host (also
+outside this repo), which does the real per-hostname routing. The live
 hostnames are `arada.fun`, `payments.arada.fun`, `agent.arada.fun`,
-`admin.arada.fun`, `finance.arada.fun` — not the `pay.`/`bot.`/`sms.`
-scheme this section originally described. `deploy/docker-compose.prod.
-yml`'s own `cloudflared` service and `deploy/cloudflared/config.yml.
-example` carry the same warning; neither reflects production traffic.
+`admin.arada.fun`, `finance.arada.fun`, `sms.arada.fun`. Because that
+Traefik routing lives entirely outside git, a 2026-09-14 incident found
+four of those routers had silently disappeared from the live host with
+zero version-controlled copy to recover from (`arada.fun` itself was
+unaffected — see `DECISIONS.md`'s entry from that date, and
+`deploy/traefik/jobingo-dynamic.yml.example`, a reconstructed reference of
+what that config should contain, added specifically so recovering from a
+repeat of this doesn't depend on tribal memory). Read
+`docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` before touching anything on
+that host.
 
-**Why this matters operationally**: because that Traefik routing lives
-entirely outside git, a 2026-09-14 incident found all four of `payments`/
-`admin`/`finance`/`agent`'s routers had silently disappeared from the
-live host with zero version-controlled copy to recover from (`arada.fun`
-itself was unaffected — see `DECISIONS.md`'s entry from that date, and
-`deploy/traefik/jobingo-dynamic.yml.example`, a reconstructed reference
-of what that config should contain, added specifically so recovering
-from a repeat of this doesn't depend on tribal memory).
+#### arada.click (Zemen Game deployment — this section's own instructions)
 
-<details>
-<summary>Original (superseded) design — kept for history, not as instructions</summary>
+This deploys to a genuinely different server, reached through the domain
+**arada.click** (Cloudflare-managed DNS, supporting unlimited subdomains)
+via a **Cloudflare Tunnel**. Unlike arada.fun, `cloudflared` here runs as
+**one of this repo's own Docker containers**
+(`deploy/docker-compose.prod.yml`'s `cloudflared` service), routing
+straight to each Compose service by its plain service name — no separate,
+untracked Traefik stack in the loop. This is deliberate, not an
+oversight: it closes the exact "routing config lives outside git" gap
+that caused arada.fun's 2026-09-14 incident, for this deployment, from
+day one.
 
-This deploys to a local server (a Proxmox VM) with no public IP, reached
-through the domain **arada.fun** via a **Cloudflare Tunnel** — DNS and the
-tunnel are both managed through Cloudflare regardless of where the domain
-itself was purchased. Five subdomains, one per public-facing service
+The hostname *pattern* mirrors arada.fun's real, live scheme rather than
+reinventing one: one apex hostname carries both the Mini App/gateway and
+the Telegram webhook (split by path), and payments/admin each answer on
+two hostnames apiece for the same underlying container
 (`engine-worker`/`payout-worker` are never exposed — their `/metrics`
 ports are for internal Prometheus scraping only):
 
-| Subdomain | Routes to | Serves |
+| Hostname | Routes to | Serves |
 |---|---|---|
-| `app.arada.fun` | `gateway:8000` | Mini App, player REST API, WebSocket |
-| `admin.arada.fun` | `admin:8001` | Admin console (IP-allowlisted at the app layer — `ADMIN_IP_ALLOWLIST` is the real boundary, not the subdomain) |
-| `pay.arada.fun` | `payments:8002` | Chapa's real webhook, `POST /webhooks/chapa` |
-| `bot.arada.fun` | `bot:8003` | Telegram's webhook, `POST /webhook` |
-| `sms.arada.fun` | `sms:8006` | SMS Control Plane console + node protocol (DECISIONS.md, 2026-09-07) — a separate product, same admin accounts |
+| `arada.click`, `www.arada.click` | `gateway:8000` | Mini App, player REST API, WebSocket |
+| `arada.click` + `PathPrefix(/webhook)` | `bot:8003` | Telegram's webhook, `POST /webhook` |
+| `payments.arada.click` | `payments:8002` | Chapa's real webhook, `POST /webhooks/chapa` |
+| `agent.arada.click` | `payments:8002` | Payment Agent Portal (same container as payments, see `docs/AGENT_DASHBOARD_GUIDE.md`) |
+| `admin.arada.click` | `admin:8001` | Admin console (IP-allowlisted at the app layer — `ADMIN_IP_ALLOWLIST` is the real boundary, not the subdomain) |
+| `finance.arada.click` | `admin:8001` | Same container as admin, finance-role login (a different set of screens, enforced server-side) |
+| `sms.arada.click` | `sms:8006` | SMS Control Plane console + node protocol (DECISIONS.md, 2026-09-07) — a separate product, same admin accounts |
 
 Routing is defined in a committed config file, not clicked together in
 the Cloudflare dashboard — see `deploy/cloudflared/config.yml.example`.
-One-time setup, on the Proxmox server itself:
+One-time setup, on the arada.click server itself:
 
 1. Install the `cloudflared` CLI ([Cloudflare's own instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) — a `.deb`/`.rpm` for the server's OS).
-2. `cloudflared tunnel login` — opens a browser to authorize against your
-   Cloudflare account (the one arada.fun's DNS is managed under).
-3. `cloudflared tunnel create jobingo` — creates the tunnel and writes a
-   credentials JSON file (path printed on success) and prints the tunnel's
-   id. Copy that credentials file to
+2. `cloudflared tunnel login` — opens a browser to authorize against the
+   Cloudflare account arada.click's DNS is managed under.
+3. `cloudflared tunnel create zemen-game` — creates the tunnel and writes
+   a credentials JSON file (path printed on success) and prints the
+   tunnel's id. Copy that credentials file to
    `deploy/cloudflared/tunnel-credentials.json` (gitignored, like
    `deploy/.env`).
-4. `cloudflared tunnel route dns jobingo app.arada.fun`, repeated for
-   `admin.arada.fun`, `pay.arada.fun`, `bot.arada.fun`, and
-   `sms.arada.fun` — this is what actually creates the DNS records;
-   nothing to add by hand in the Cloudflare dashboard.
+4. `cloudflared tunnel route dns zemen-game <hostname>`, once per hostname
+   in the table above (`arada.click`, `www.arada.click`,
+   `payments.arada.click`, `agent.arada.click`, `admin.arada.click`,
+   `finance.arada.click`, `sms.arada.click`) — this is what actually
+   creates the DNS records; nothing to add by hand in the Cloudflare
+   dashboard, and arada.click's Cloudflare-managed zone means each of
+   these is just a new record, no extra domain purchase needed.
 5. Copy `deploy/cloudflared/config.yml.example` to
    `deploy/cloudflared/config.yml` (gitignored) and replace `<TUNNEL_ID>`
-   with the id step 3 printed. The five `ingress:` rules already match the
+   with the id step 3 printed. The `ingress:` rules already match the
    table above — no other edits needed unless a subdomain changes.
 
-Once `deploy/.env` has real values for `PUBLIC_BASE_URL`
-(`https://bot.arada.fun`), `PAYMENTS_PUBLIC_BASE_URL`
-(`https://pay.arada.fun`), and `MINIAPP_URL` (`https://app.arada.fun`),
-`docker compose -f docker-compose.prod.yml up -d` brings up `cloudflared`
-alongside everything else and the tunnel starts routing real traffic —
-same lifecycle as every other service in the stack, restarted automatically
-on failure (`restart: unless-stopped`), never profile-gated (unlike the
-dev compose file's optional observability services, this tunnel *is*
+Once `deploy/.env` has real values for `MINIAPP_URL`
+(`https://arada.click`), `PUBLIC_BASE_URL` (`https://arada.click`, the
+same apex hostname — the webhook is split by path, not by subdomain),
+`PAYMENTS_PUBLIC_BASE_URL` (`https://payments.arada.click`), and
+`AGENT_PORTAL_BASE_URL` (`https://agent.arada.click`), `docker compose -f
+docker-compose.prod.yml up -d` brings up `cloudflared` alongside
+everything else and the tunnel starts routing real traffic — same
+lifecycle as every other service in the stack, restarted automatically on
+failure (`restart: unless-stopped`), never profile-gated (unlike the dev
+compose file's optional observability services, this tunnel *is*
 production ingress, not an add-on).
 
-</details>
+`deploy/traefik/*` describes arada.fun's external Traefik stack and does
+not apply to this deployment — arada.click needs no Traefik at all,
+cloudflared's own ingress rules do the per-hostname (and per-path)
+routing directly.
+
 
 **Verified against the real repo, not assumed:** a status-audit pass
 checked GitHub's own run history (`gh run list`) rather than trusting

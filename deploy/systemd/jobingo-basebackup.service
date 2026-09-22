@@ -1,5 +1,5 @@
 [Unit]
-Description=Arada Bingo physical base backup for PITR (pg_basebackup via deploy/basebackup.sh)
+Description=Zemen Game physical base backup for PITR (pg_basebackup via deploy/basebackup.sh)
 Wants=network-online.target
 After=network-online.target docker.service
 

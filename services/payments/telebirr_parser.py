@@ -24,9 +24,9 @@ bearing distinction CTO directive section 13 calls "SMS direction check":
 parse_telebirr_sms() always resolves recipient_name/recipient_phone to
 whoever the money actually went TO, regardless of which phone the SMS
 came from -- the caller (telebirr_ingest.py) then matches THAT against
-the configured Arada Bingo destination, so a player forwarding their own
+the configured Zemen Game destination, so a player forwarding their own
 "transferred to some unrelated person" SMS is naturally rejected: the
-extracted recipient is that unrelated person, not Arada Bingo, and no
+extracted recipient is that unrelated person, not Zemen Game, and no
 special-casing is needed beyond extracting the right field.
 
 Fails closed (ParseFailure, never a guess) on anything that matches

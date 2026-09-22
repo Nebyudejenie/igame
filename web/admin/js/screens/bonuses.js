@@ -168,7 +168,7 @@ export async function render(container) {
             internalName: `Announce: ${rule.name}`,
             title: rule.trigger_type === "referral_reward" ? "Refer a friend, earn a reward!" : "New bonus available!",
             body: rule.trigger_type === "referral_reward"
-              ? `Invite a friend to Arada Bingo and earn ${rewardText} once they make a qualifying deposit. Use your invite link from the Invite button in the bot menu.`
+              ? `Invite a friend to Zemen Game and earn ${rewardText} once they make a qualifying deposit. Use your invite link from the Invite button in the bot menu.`
               : `A new bonus is live: ${rule.name}, worth ${rewardText}. Check your wallet for details.`,
           }));
           document.querySelector('.nav-btn[data-screen="notifications"]').click();

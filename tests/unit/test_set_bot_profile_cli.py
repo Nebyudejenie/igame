@@ -29,7 +29,7 @@ def _fake_bot(*, matches_target: bool) -> AsyncMock:
     production was actually found in on 2026-09-18).
     """
     bot = AsyncMock()
-    bot.get_me.return_value = User(id=8988277728, is_bot=True, first_name="Arada Bingo", username="aradabbot")
+    bot.get_me.return_value = User(id=8988277728, is_bot=True, first_name="Zemen Game", username="zemengamebot")
 
     async def get_short(language_code: str | None = None) -> BotShortDescription:
         text = TARGET_SHORT_DESCRIPTION[language_code or ""] if matches_target else ""

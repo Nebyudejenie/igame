@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.pool.close()
 
 
-app = FastAPI(lifespan=lifespan, title="Arada Bingo Payments API")
+app = FastAPI(lifespan=lifespan, title="Zemen Game Payments API")
 
 
 @app.post("/webhooks/chapa")

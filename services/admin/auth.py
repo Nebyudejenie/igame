@@ -74,7 +74,7 @@ def generate_totp_secret() -> str:
     return pyotp.random_base32()
 
 
-def totp_provisioning_uri(secret: str, username: str, issuer: str = "Arada Bingo Admin") -> str:
+def totp_provisioning_uri(secret: str, username: str, issuer: str = "Zemen Game Admin") -> str:
     return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=issuer)
 
 

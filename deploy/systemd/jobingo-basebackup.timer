@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly Arada Bingo physical base backup
+Description=Weekly Zemen Game physical base backup
 
 [Timer]
 # Weekly, not daily: WAL archiving is continuous (docs/DISASTER_RECOVERY.md)

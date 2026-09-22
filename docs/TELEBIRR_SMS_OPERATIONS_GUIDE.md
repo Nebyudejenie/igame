@@ -526,7 +526,7 @@ number (none of these fields exist in the request model either).
 ## 7. Payment Agent Role
 
 ```text
-1. A player makes a Telebirr payment to the configured Arada Bingo
+1. A player makes a Telebirr payment to the configured Zemen Game
    Telebirr account, following whatever business process is in place
    (e.g. paying in person, or via Telebirr directly).
 2. Telebirr sends its own confirmation SMS to the dedicated phone/agent.
@@ -608,7 +608,7 @@ recognizes an authorized agent's plain text message automatically.
 ## 9. Player User Guide
 
 ```text
-1. Make the Telebirr payment to the account Arada Bingo has told you to
+1. Make the Telebirr payment to the account Zemen Game has told you to
    pay (shown on the deposit screen / provided by support).
 2. Wait for the payment to be recorded (this happens automatically once
    the agent/device forwards the SMS — usually within moments).

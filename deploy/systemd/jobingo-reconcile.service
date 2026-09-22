@@ -1,5 +1,5 @@
 [Unit]
-Description=Arada Bingo nightly ledger reconciliation (packages/core/reconcile_job.py via the reconcile-job compose service)
+Description=Zemen Game nightly ledger reconciliation (packages/core/reconcile_job.py via the reconcile-job compose service)
 Wants=network-online.target
 After=network-online.target docker.service
 

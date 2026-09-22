@@ -44,7 +44,7 @@ async def _create(username: str, password: str, role: str) -> tuple[int, str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Provision a new Arada Bingo admin account.")
+    parser = argparse.ArgumentParser(description="Provision a new Zemen Game admin account.")
     parser.add_argument("--username", required=True)
     parser.add_argument("--role", required=True, choices=sorted(VALID_ROLES))
     args = parser.parse_args()

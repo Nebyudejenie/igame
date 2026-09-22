@@ -301,7 +301,7 @@ async def test_admin_rejected_manual_deposit_notifies_with_the_reason(pool, redi
         user_id = await _register(conn, telegram_id)
         destination_row = await conn.fetchrow(
             "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
-            "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id"
+            "VALUES ('telebirr', '0911000000', 'Zemen Game PLC') RETURNING id"
         )
         intent = await manual.create_manual_deposit_request(
             pool,

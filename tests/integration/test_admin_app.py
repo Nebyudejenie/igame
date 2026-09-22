@@ -357,7 +357,7 @@ async def test_console_frontend_is_reachable_with_no_allowlist(admin_server):
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{admin_server}/console/")
     assert response.status_code == 200
-    assert "Arada Bingo Admin" in response.text
+    assert "Zemen Game Admin" in response.text
 
 
 async def test_console_frontend_is_blocked_by_the_ip_allowlist(admin_server):

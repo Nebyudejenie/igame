@@ -328,7 +328,7 @@ async def test_api_deposit_manual_refuses_when_admin_disables_manual(gateway_ser
     admin_id, *_ = await create_test_admin(pool)
     destination_id = await admin_queries.create_manual_payment_destination_admin(
         pool, admin_id=admin_id, method_kind="telebirr", account_ref="0911000000",
-        account_name="Arada Bingo PLC", instructions=None, ip_address="10.0.0.1",
+        account_name="Zemen Game PLC", instructions=None, ip_address="10.0.0.1",
     )
     await admin_queries.set_payment_provider_availability_admin(
         pool, admin_id=admin_id, provider="manual", direction="in", enabled=False,

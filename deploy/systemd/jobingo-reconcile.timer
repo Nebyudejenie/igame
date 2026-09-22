@@ -1,5 +1,5 @@
 [Unit]
-Description=Nightly Arada Bingo ledger reconciliation
+Description=Nightly Zemen Game ledger reconciliation
 
 [Timer]
 # Daily at 03:30 host time -- after jobingo-backup (02:00) and

@@ -73,7 +73,7 @@ async def test_create_and_update_manual_payment_destination(pool, conn):
 
     destination_id = await queries.create_manual_payment_destination_admin(
         pool, admin_id=admin_id, method_kind="cbe_birr", account_ref="1000123456789",
-        account_name="Arada Bingo PLC", instructions="Reference your Arada Bingo user id in the memo",
+        account_name="Zemen Game PLC", instructions="Reference your Zemen Game user id in the memo",
         ip_address="10.0.0.1",
     )
     assert isinstance(destination_id, int)
@@ -118,7 +118,7 @@ async def test_update_destination_effective_dates_from_a_real_json_body(pool):
     admin_id, *_ = await create_test_admin(pool)
     destination_id = await queries.create_manual_payment_destination_admin(
         pool, admin_id=admin_id, method_kind="telebirr", account_ref="0911000000",
-        account_name="Arada Bingo PLC", instructions=None, ip_address="10.0.0.1",
+        account_name="Zemen Game PLC", instructions=None, ip_address="10.0.0.1",
     )
 
     updated = await queries.update_manual_payment_destination_admin(
@@ -151,7 +151,7 @@ async def test_update_destination_rejects_an_unknown_field(pool):
     admin_id, *_ = await create_test_admin(pool)
     destination_id = await queries.create_manual_payment_destination_admin(
         pool, admin_id=admin_id, method_kind="telebirr", account_ref="0911000000",
-        account_name="Arada Bingo PLC", instructions=None, ip_address="10.0.0.1",
+        account_name="Zemen Game PLC", instructions=None, ip_address="10.0.0.1",
     )
     try:
         await queries.update_manual_payment_destination_admin(
@@ -205,7 +205,7 @@ async def test_finance_cannot_create_manual_payment_destinations_over_http(admin
         response = await client.post(
             f"{admin_server}/manual-payment-destinations",
             headers=headers,
-            json={"method_kind": "telebirr", "account_ref": "0911000000", "account_name": "Arada Bingo PLC"},
+            json={"method_kind": "telebirr", "account_ref": "0911000000", "account_name": "Zemen Game PLC"},
         )
     assert response.status_code == 403
 

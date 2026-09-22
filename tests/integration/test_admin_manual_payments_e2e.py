@@ -51,7 +51,7 @@ async def test_superadmin_creates_a_manual_payment_destination_over_a_real_brows
 
     await page.select_option('select[name="method_kind"]', "cbe_birr")
     await page.fill('input[name="account_ref"]', "1000998877665")
-    await page.fill('input[name="account_name"]', "Arada Bingo PLC")
+    await page.fill('input[name="account_name"]', "Zemen Game PLC")
     await page.fill('input[name="instructions"]', "Include your player id in the memo")
     await page.click('#create-destination-form button[type="submit"]')
 
@@ -69,7 +69,7 @@ async def test_superadmin_creates_a_manual_payment_destination_over_a_real_brows
         "1000998877665",
     )
     assert row is not None
-    assert row["account_name"] == "Arada Bingo PLC"
+    assert row["account_name"] == "Zemen Game PLC"
     assert row["is_active"] is True
 
     assert page_errors == [], f"JS errors during destination-create flow: {page_errors}"
@@ -117,7 +117,7 @@ async def test_finance_approves_a_manual_deposit_over_a_real_browser(admin_serve
     destination_row = await conn.fetchrow(
         """
         INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name)
-        VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id
+        VALUES ('telebirr', '0911000000', 'Zemen Game PLC') RETURNING id
         """
     )
     intent = await manual.create_manual_deposit_request(
@@ -169,7 +169,7 @@ async def test_two_different_finance_admins_approve_a_high_value_manual_deposit_
     destination_row = await conn.fetchrow(
         """
         INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name)
-        VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id
+        VALUES ('telebirr', '0911000000', 'Zemen Game PLC') RETURNING id
         """
     )
     intent = await manual.create_manual_deposit_request(

@@ -1,5 +1,5 @@
 [Unit]
-Description=Arada Bingo logical backup (pg_dump via deploy/backup.sh)
+Description=Zemen Game logical backup (pg_dump via deploy/backup.sh)
 Wants=network-online.target
 After=network-online.target docker.service
 

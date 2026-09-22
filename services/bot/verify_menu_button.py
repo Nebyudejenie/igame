@@ -71,7 +71,7 @@ async def _run(fix: bool, *, settings: Settings | None = None, bot: Bot | None =
 
         # Telegram normalizes a bare-domain URL by appending "/" -- a real
         # false negative this caught against production: setChatMenuButton
-        # with "https://arada.fun" round-tripped as "https://arada.fun/"
+        # with "https://arada.click" round-tripped as "https://arada.click/"
         # from the very next getChatMenuButton, correct in every way that
         # matters (the WebView opens the same page either way) but not
         # byte-equal, which made this check report "still broken" forever

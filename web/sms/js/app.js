@@ -41,7 +41,7 @@ const contentEl = document.getElementById("content");
 
 function buildNav(active) {
   navEl.innerHTML = `
-    <div class="nav-brand">Arada Bingo SMS</div>
+    <div class="nav-brand">Zemen Game SMS</div>
     ${visibleScreens(getRole()).map(([name, mod]) => `
       <button class="nav-btn ${name === active ? "active" : ""}" data-screen="${name}">${mod.label}</button>
     `).join("")}
