@@ -211,6 +211,30 @@ services:
       - "8007:8007"
     command: ["python", "-m", "services.engine.simulated_players_worker"]
 
+  # Keno's own round-cycle engine (services/engine/keno_worker.py) --
+  # exactly one global round cycle, not one per room, so there's no
+  # room-claiming layer the way engine-worker has; single-owner
+  # enforcement is a Redis lock inside KenoRoundEngine.run_forever()
+  # itself (services/engine/keno_lock.py), so more than one replica of
+  # this service is safe -- only one ever actually advances a round at a
+  # time, the rest sit in a retry-with-backoff loop ready to take over.
+  # Running this container is NOT the same as Keno being live: every
+  # ticket-placement path checks the DB-level keno_enabled flag
+  # (keno_configs.keno_enabled, defaults false, see migrations/versions/
+  # a3f7c2e91b04_keno_core_schema.py) before any money moves, and
+  # web/miniapp's own Keno entry point stays hidden client-side
+  # (open-keno-btn) until a real config exists regardless -- this only
+  # makes rounds exist to configure against, never exposes Keno to a
+  # player on its own.
+  keno-worker:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8008:8008"
+    command: ["python", "-m", "services.engine.keno_worker"]
+
   # One-shot, same shape as migrate above -- spec section 14's definition
   # of done needs this "verified nightly", but nothing runs it on a
   # schedule yet. profiles: ["reconcile"] (the same gating
