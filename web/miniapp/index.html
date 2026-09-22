@@ -156,7 +156,14 @@
           <span class="wallet-fab-label" data-i18n="invite.button"></span>
         </button>
         <button id="voice-settings-btn" class="icon-fab">🔊</button>
-        <button id="open-keno-btn" class="wallet-fab keno-fab">
+        <!-- Starts hidden -- shown only once checkKenoAvailability() (app.v6.js)
+             confirms /api/keno/state doesn't 503. A deployment where Keno has
+             never been configured (keno_configs has zero rows -- the real state
+             of a fresh production deploy, see docs/keno/PROGRESS.md's own
+             production gate) would otherwise let a player tap into a game
+             center with no round/config data, refreshState() silently no-op'ing
+             on the 503 and leaving a blank, un-explained screen behind. -->
+        <button id="open-keno-btn" class="wallet-fab keno-fab hidden">
           <span aria-hidden="true">🎱</span>
           <span class="wallet-fab-label" data-i18n="keno.nav_button"></span>
         </button>

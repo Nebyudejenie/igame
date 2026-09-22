@@ -993,6 +993,21 @@ async function fetchInviteSummary() {
   }
 }
 
+// Reveals the Keno FAB only once /api/keno/state proves a round/config
+// genuinely exists -- a 503 ("keno_not_configured", the real state of a
+// fresh deployment with zero keno_configs rows) leaves it hidden rather
+// than open onto keno.js's own blank-screen no-op (refreshState() there
+// silently returns on a non-ok response). Stays hidden on a network
+// error too -- the safe default when we can't tell either way.
+async function checkKenoAvailability() {
+  try {
+    const response = await fetch("/api/keno/state", { headers: authHeader() });
+    if (response.ok) el("open-keno-btn").classList.remove("hidden");
+  } catch {
+    /* stays hidden -- see comment above */
+  }
+}
+
 el("invite-btn").addEventListener("click", async () => {
   haptics.lightTap();
   const panel = el("invite-panel");
@@ -2226,6 +2241,7 @@ async function boot() {
   refreshRoomList();
   fetchAnnouncement();
   fetchInviteSummary();
+  checkKenoAvailability();
   // Warms the browser's cache for all 75 call clips well before any
   // room's first call -- see voiceCaller.preloadAll()'s own docstring
   // for why this specifically helps on a weak connection.
