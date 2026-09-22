@@ -382,8 +382,61 @@ promtool, real test runs) — see each item's own commit for full detail:**
    already refuses to fabricate that kind of assumption (see
    SantimPay/ArifPay). Flagged, not silently missing.
 
+## 2026-09-22 (later same day) — Part 17 chaos/load testing closed
+
+Three new tests (`tests/integration/test_keno_chaos_engine_crash.py`,
+`test_keno_chaos_redis_restart.py`, `test_keno_load_concurrent_tickets.py`),
+mirroring Bingo's own equivalents but exercising Keno's own,
+deliberately different behavior where it actually differs:
+
+1. **Engine crash recovery.** Kills a real running `KenoRoundEngine`
+   mid-betting-phase with 40 real staked players (`task.cancel()`, no
+   graceful stop), then proves a fresh engine's `recover_on_startup()`
+   *resumes* the round to a correct settlement rather than voiding it.
+   Unlike Bingo (always void + refund), Keno's own recovery design is
+   correct to resume any round under `STUCK_ROUND_THRESHOLD_SECONDS`
+   (300s) — the draw is a deterministic commit-reveal function already
+   persisted before betting even closes, so refunding would incorrectly
+   hand stakes back to tickets that may have actually won.
+2. **Redis outage.** A real (not simulated) `docker compose stop redis`
+   outage mid-round, proving `KenoRoundLock` gives up cleanly and a
+   fresh engine recovers. Needed a genuine stop/start gap (15s) rather
+   than a fast `restart` (sub-second) — the lock's own 5s-refresh/~10s
+   -give-up margin silently rides out a fast restart without ever
+   losing the lock, so a naive restart-based test would pass without
+   exercising recovery at all. `chaos_infra`, always run alone, same
+   convention as `test_chaos_redis_restart.py`.
+3. **Concurrent ticket rush.** 300 concurrent `place_ticket()` calls
+   against one round under a deliberately tight
+   `max_round_exposure_pct`, proving the row-locked exposure check
+   actually serializes under real contention: never oversold, every
+   accepted ticket's stake debited exactly once, ledger reconciles
+   exactly. Hit real shared-dev-database pollution twice along the way
+   (the global `keno_reserve` singleton had ~55M ETB accumulated from
+   the day's other testing by the time this was written) — fixed by
+   resetting the reserve to a small known baseline via a real
+   ledger-posted withdrawal before seeding the test's own tier, not by
+   guessing a number that happened to work.
+
+A real bug surfaced only by running the crash test and the load test
+back to back, not by either alone: the crash test had no try/finally
+around the doomed engine's task. A genuine race — 40 concurrent
+`place_ticket()` calls occasionally outrunning a too-short 3s betting
+window, raising `RoundNotAcceptingBets` — could fire *before* the
+test's own deliberate `task.cancel()` ever ran, orphaning that engine
+for the rest of the pytest process. Left unsupervised, it kept
+creating and settling its own real rounds against the shared
+`keno_reserve`, corrupting whatever test ran next — traced via a
+downstream reserve-balance mismatch in the load test that only showed
+up when the two files ran in the same batch. Fixed with a proper
+try/finally safety net around the doomed engine's whole lifecycle, plus
+a more generous 10s betting window. Verified clean over 4 consecutive
+paired runs and a full `-m load` batch run afterward.
+
+`mypy` strict (`packages`/`services`/`migrations`, the project's actual
+configured scope — `tests/` isn't in it) still reports zero issues.
+
 **Still open on the Part 7 gate:**
-- Part 17: chaos/load testing, entirely unstarted.
 - `scripts/verify-round.ts` and 11 of 12 required `docs/keno/*.md` files
   (only this one and `00-discovery.md` exist).
 - The one real remaining decision: how much actual capital to seed
@@ -394,6 +447,11 @@ promtool, real test runs) — see each item's own commit for full detail:**
   App button) — a separate, explicit decision regardless of how ready
   everything else is, not something that follows automatically from
   finishing the checklist above.
+- Redeploying this session's backend work (dead-metrics fix, tier
+  automation, reserve endpoint, risk-of-ruin simulator, Part 17 tests)
+  to the arada.click production server — pushed to `igame` only so far;
+  an earlier deploy attempt was interrupted by a server outage and
+  explicitly deferred by the operator ("you can deploy later").
 
-**Next step**: Part 17 chaos/load testing, or the docs backlog — both
-are open and neither blocks the other.
+**Next step**: the docs backlog is the only unstarted item that isn't a
+real-money or deploy decision reserved for the operator.
