@@ -25,11 +25,22 @@ Every `.service` file has `WorkingDirectory=/home/cosmic/game` and a
 matching path in `Environment=COMPOSE_FILE=...` (or, for
 `jobingo-reconcile.service`, an inlined `-f /home/cosmic/game/deploy/
 docker-compose.prod.yml` in its `ExecStart=`) — this is this repo's own
-known production deploy path (`docs/reference_deployment_target.md`
--equivalent: `cosmic@192.168.1.173:/home/cosmic/game`). **Confirm this is
+production deploy path, `cosmic@/home/cosmic/game`. **Confirm this is
 still correct on the real host before installing** — if the checkout ever
 moves, update all four `.service` files to match, the same as any other
 deploy-path-dependent script in this repo.
+
+The host address itself: this file, and several older docs (`docs/
+FINAL_HUMAN_ACTIONS.md`, `docs/LAUNCH_BLOCKERS.md`, `docs/
+PRODUCTION_READINESS.md`, `docs/PRODUCTION_HOST_VERIFICATION.md`, `docs/
+keno/00-discovery.md`), previously cited `192.168.1.173` -- but every one
+of those citations says in its own text that `.173` was never actually
+confirmed reachable from any session. `192.168.1.115` is the address a
+2026-09-23 session used successfully, repeatedly, all day (SSH, real
+deploys, real migrations) -- see `docs/keno/PROGRESS.md`'s entries from
+that date and `docs/ops/vps-migration.md`. Treat `.173` across every doc
+above as stale until each one is individually corrected; this file now
+is.
 
 ## Install (on the production host, as a user with sudo)
 
