@@ -542,10 +542,21 @@ that only surfaced when two test files ran together (see the Part 17
 entry above for the fix; the report documents the finding and final
 clean numbers).
 
+## 2026-09-23 (later still) — Jackpot pool seed migration deployed to production
+
+`f1a9d4c7e2b5` deployed to arada.click: pulled the 13 commits from the
+docs-backlog session (docs don't need a rebuild, but the migration file
+itself does — a real image-vs-checkout gap the first attempt hit: the
+`migrate` container runs off the baked `jobingo:latest` image, not the
+host's git checkout, so `docker compose run --rm migrate` silently did
+nothing against the old image before the rebuild). Rebuilt the image,
+ran the migration, confirmed `alembic_version = f1a9d4c7e2b5` and a
+real `keno_jackpot_pool` row now exists (`account_id=297`, the
+production ledger account, created fresh by this migration since no
+Keno ticket had ever been placed there before). Stack still healthy
+after: all 9 services up, zero restarts, `/healthz` green.
+
 **Still open:**
-- The `keno_jackpot_pool` seed migration (`f1a9d4c7e2b5`) needs
-  deploying to production — should ship alongside or before the
-  `keno_enabled` go-live flip, not after.
 - Part 8's revenue/cohort metrics computation is entirely unbuilt
   (gauges declared, nothing populates them).
 - No admin web UI for Keno exists — API-only today.
@@ -562,7 +573,7 @@ clean numbers).
   responsibility, flagged in `12-compliance.md`, not something any of
   this technical work resolves.
 
-**Next step**: deploy the jackpot-pool-seed migration, then the two
-operator-only decisions (reserve funding amount, go-live flip) are the
-only things left blocking launch. Everything else on the original Part
-7/14/15/17/19 checklist is now done.
+**Next step**: the two operator-only decisions (reserve funding amount,
+go-live flip) are the only things left blocking launch. Every technical
+item on the original Part 7/14/15/17/19 checklist is now done and
+deployed.
