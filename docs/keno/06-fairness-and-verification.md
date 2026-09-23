@@ -89,9 +89,19 @@ The server performs exactly this check itself and returns the result
 as `"verified": true|false` in the same response — `packages.core.
 keno.verify_draw()` is the single function both the server-side check
 and any independent client-side re-derivation must reproduce.
-`scripts/verify-round.ts` is a standalone port of this same logic,
-runnable offline with no server trust at all — see that script for the
-canonical TypeScript reference implementation.
+`scripts/verify-round.ts` is a standalone, dependency-free port of this
+same logic (Node's built-in `crypto` only), runnable fully offline given
+just the three published values — no server trust, no account, no
+network call required. It also has a `--round <id> --auth 'tma
+<initData>'` convenience mode that fetches those values for you first,
+but that mode still needs a real, signed Telegram session — every
+gateway route requires one by platform-wide design, not a
+Keno-specific restriction — so it's a convenience for someone who
+already has API access, not a way to bypass authentication. The offline
+mode is the one that actually delivers "verifiable by anyone, trusting
+nothing." Cross-checked against the real Python implementation with
+several random seed/draw vectors before being trusted here — see that
+script's own header comment for exact usage.
 
 ## What is deliberately *not* covered here
 
