@@ -447,11 +447,56 @@ configured scope — `tests/` isn't in it) still reports zero issues.
   App button) — a separate, explicit decision regardless of how ready
   everything else is, not something that follows automatically from
   finishing the checklist above.
-- Redeploying this session's backend work (dead-metrics fix, tier
-  automation, reserve endpoint, risk-of-ruin simulator, Part 17 tests)
-  to the arada.click production server — pushed to `igame` only so far;
-  an earlier deploy attempt was interrupted by a server outage and
-  explicitly deferred by the operator ("you can deploy later").
-
 **Next step**: the docs backlog is the only unstarted item that isn't a
 real-money or deploy decision reserved for the operator.
+
+## 2026-09-23 — Backend work deployed to arada.click
+
+The arada.click server (zemen-game-server, 192.168.1.115) had two full
+outages the previous session — a kernel-upgrade reboot, then a second,
+unexplained one where it went fully unreachable (100% ping loss, no
+ICMP response, SSH timed out). It came back on its own; postgres and
+redis had been running continuously the whole time (17+ hours, no
+restart), so this was a network-level outage, not a power loss —
+worth noting since two outages in one window with no clear cause is
+still a pattern worth watching, not fully explained.
+
+With the box back and reachable, deployed everything that had only
+been pushed to `igame` until now:
+
+- `git pull --ff-only` on the server: 11 commits, `b22514a..671bdd0`.
+- Rebuilt the `jobingo:latest` image from the fresh checkout (`docker
+  compose build` reported "no services to build" — this image is a
+  plain `docker build`, not compose-managed — so built it directly).
+- Ran migrations: `c4e8f1a9b6d3` (production launch seed), `d7a2f5c8e1b4`
+  (tier changes table), `e9c3b7f2a5d8` (reserve withdrawal floor) all
+  applied cleanly; `alembic_version` confirmed at `e9c3b7f2a5d8`.
+- Brought up the full stack including `keno-worker` for the first time
+  ever in production. Verified past "container didn't crash": queried
+  `keno_rounds` directly and watched 8 real rounds cycle cleanly in the
+  first ~5 minutes (each completing on schedule, the next starting
+  immediately after) — the engine only logs on exceptional events
+  (recovery, failure), so a quiet log stream during a healthy cycle is
+  expected, not a red flag; the database is the real signal.
+- Zero restarts, zero errors in any service's logs across the whole
+  stack (gateway/admin/payments/bot/sms/engine-worker/payout-worker/
+  simulated-players-worker/keno-worker) after the rebuild.
+- `https://arada.click/healthz` → `{"status":"ok"}`.
+- Confirmed directly via `psql`: `keno_configs` still has exactly one
+  row, `keno_enabled = false` — the backend is live and running, but
+  the game is still fully gated off from real players.
+
+**Still open on the Part 7 gate:**
+- `scripts/verify-round.ts` and 11 of 12 required `docs/keno/*.md` files
+  (only this one and `00-discovery.md` exist).
+- The one real remaining decision: how much actual capital to seed
+  `keno_reserve` with. Not touched — real money, needs the operator's
+  own number, shown and confirmed before anything is posted, same
+  standing rule as every other real-money action this session.
+- The actual go-live moment (flipping `keno_enabled`, un-hiding the Mini
+  App button) — a separate, explicit decision regardless of how ready
+  everything else is, not something that follows automatically from
+  finishing the checklist above.
+
+**Next step**: the docs backlog and the two operator-only decisions
+(reserve funding amount, go-live flip) are all that's left.
