@@ -993,12 +993,26 @@ async function fetchInviteSummary() {
   }
 }
 
-// Reveals the Keno FAB only once /api/keno/state proves a round/config
-// genuinely exists -- a 503 ("keno_not_configured", the real state of a
-// fresh deployment with zero keno_configs rows) leaves it hidden rather
-// than open onto keno.js's own blank-screen no-op (refreshState() there
-// silently returns on a non-ok response). Stays hidden on a network
-// error too -- the safe default when we can't tell either way.
+// Reveals the Keno FAB only once /api/keno/state returns 200 -- as of
+// 2026-09-23 that response code is the actual, server-enforced signal
+// for "this specific caller is allowed to see and play Keno right now"
+// (packages.core.keno_queries.game_center_state checks keno_enabled AND
+// the staged-launch beta allowlist before returning anything), not
+// merely "a round happens to exist." A CTO review caught the earlier
+// version of this comment/check being wrong about that: the endpoint
+// used to return live round state to any authenticated user the
+// instant a single round had ever been created, regardless of
+// keno_enabled -- so this file's own "only once ... genuinely exists"
+// claim was true of the round, not of whether that user should be
+// seeing it. The fix belongs entirely server-side (a client can't be
+// trusted to self-enforce who's allowed to play), so this function
+// itself doesn't change -- checking response.ok is now correct because
+// the backend's 200 finally means what this comment always claimed it
+// meant. 503 ("keno_not_configured") covers both "never configured"
+// and "not allowed yet" identically and deliberately -- see the
+// backend's own docstring for why the two are indistinguishable on
+// purpose. Stays hidden on a network error too -- the safe default
+// when we can't tell either way.
 async function checkKenoAvailability() {
   try {
     const response = await fetch("/api/keno/state", { headers: authHeader() });

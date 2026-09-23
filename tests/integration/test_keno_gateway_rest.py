@@ -15,6 +15,7 @@ import pytest
 
 from packages.core import keno, ledger
 from tests.integration.conftest import build_init_data, fund_user, next_telegram_id
+from tests.integration.test_admin_auth import create_test_admin
 from tests.integration.test_gateway_rest import http_base
 
 pytestmark = pytest.mark.asyncio
@@ -29,17 +30,20 @@ def _next_version() -> int:
 _MULTIPLIERS = {1: Decimal("3.40")}
 
 
-async def _seed_open_round(conn) -> int:
+async def _seed_open_round(conn, *, keno_enabled: bool = True, beta_restricted: bool = False) -> int:
     version = _next_version()
     config_id = await conn.fetchval(
         """
         INSERT INTO keno_configs
             (version, round_cycle_seconds, betting_seconds, draw_seconds, result_seconds,
-             max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled)
-        VALUES ($1, 45, 25, 12, 8, 5, 5000, true)
+             max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled,
+             beta_restricted)
+        VALUES ($1, 45, 25, 12, 8, 5, 5000, $2, $3)
         RETURNING id
         """,
         version,
+        keno_enabled,
+        beta_restricted,
     )
     tier_id = await conn.fetchval(
         """
@@ -342,3 +346,81 @@ async def test_get_and_stop_autoplay_over_http(gateway_server, pool):
         after = await client.get(f"{http_base(gateway_server)}/api/keno/autoplay", headers=headers)
         assert after.status_code == 200
         assert after.json() is None
+
+
+# --- staged-launch beta allowlist (2026-09-23, a CTO review's own required
+# gate before any Stage 1) -----------------------------------------------
+#
+# The real bug this covers: GET /api/keno/state used to return live round
+# state to *any* authenticated user the instant a single round had ever
+# been created, never checking keno_enabled at all -- the Mini App button
+# was effectively visible to real users regardless of keno_enabled. These
+# three tests are the exact matrix a CTO review asked for: disabled hides
+# it, enabled-but-not-allowlisted still hides it (and still rejects a bet),
+# allowlisted shows it and lets a bet through.
+
+
+async def _authed_headers(gateway_server, pool, conn) -> tuple[dict[str, str], int]:
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+    user_id = (await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id))["id"]
+    await fund_user(conn, user_id, Decimal("1000.00"))
+    return {"Authorization": f"tma {init_data}"}, user_id
+
+
+async def test_keno_state_hidden_when_keno_disabled(gateway_server, pool, conn):
+    await _seed_open_round(conn, keno_enabled=False, beta_restricted=True)
+    headers, _user_id = await _authed_headers(gateway_server, pool, conn)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{http_base(gateway_server)}/api/keno/state", headers=headers)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "keno_not_configured"
+
+
+async def test_keno_state_hidden_and_betting_rejected_when_enabled_but_not_allowlisted(gateway_server, pool, conn):
+    await _seed_open_round(conn, keno_enabled=True, beta_restricted=True)
+    headers, _user_id = await _authed_headers(gateway_server, pool, conn)
+
+    async with httpx.AsyncClient() as client:
+        state_response = await client.get(f"{http_base(gateway_server)}/api/keno/state", headers=headers)
+    # Identical response to "never configured" (test above) -- see
+    # game_center_state()'s own docstring for why the two are
+    # deliberately indistinguishable from the outside.
+    assert state_response.status_code == 503
+    assert state_response.json()["detail"] == "keno_not_configured"
+
+    async with httpx.AsyncClient() as client:
+        ticket_response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/tickets",
+            headers=headers,
+            json={"picks": [7], "stake": "10", "idempotency_key": f"test-beta-{uuid.uuid4()}"},
+        )
+    assert ticket_response.status_code == 422
+    assert ticket_response.json()["detail"] == "keno_not_on_allowlist"
+
+
+async def test_keno_state_visible_and_betting_allowed_once_allowlisted(gateway_server, pool, conn):
+    round_id = await _seed_open_round(conn, keno_enabled=True, beta_restricted=True)
+    headers, user_id = await _authed_headers(gateway_server, pool, conn)
+
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    await conn.execute(
+        "INSERT INTO keno_beta_allowlist (user_id, added_by_admin_id, reason) VALUES ($1, $2, 'e2e test')",
+        user_id, admin_id,
+    )
+
+    async with httpx.AsyncClient() as client:
+        state_response = await client.get(f"{http_base(gateway_server)}/api/keno/state", headers=headers)
+    assert state_response.status_code == 200
+    assert state_response.json()["round_id"] == round_id
+
+    async with httpx.AsyncClient() as client:
+        ticket_response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/tickets",
+            headers=headers,
+            json={"picks": [7], "stake": "10", "idempotency_key": f"test-beta-{uuid.uuid4()}"},
+        )
+    assert ticket_response.status_code == 200, ticket_response.text
+    assert ticket_response.json()["round_id"] == round_id

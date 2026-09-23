@@ -1674,6 +1674,51 @@ async def set_keno_current_tier(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.get("/keno/beta-allowlist")
+async def list_keno_beta_allowlist(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+) -> list[dict[str, Any]]:
+    return await keno_queries.list_beta_allowlist_admin(app.state.pool)
+
+
+class KenoBetaAllowlistRequest(BaseModel):
+    user_id: int
+    reason: str
+
+
+@app.post("/keno/beta-allowlist")
+async def add_keno_beta_allowlist(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+    body: KenoBetaAllowlistRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await keno_queries.add_to_beta_allowlist_admin(
+            app.state.pool, admin_id=admin.admin_id, user_id=body.user_id, reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/keno/beta-allowlist/{user_id}")
+async def remove_keno_beta_allowlist(
+    user_id: int,
+    reason: str,
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("keno:configure"))],
+) -> dict[str, Any]:
+    _require_reason(reason)
+    try:
+        return await keno_queries.remove_from_beta_allowlist_admin(
+            app.state.pool, admin_id=admin.admin_id, user_id=user_id, reason=reason,
+            ip_address=_client_ip(request),
+        )
+    except keno_queries.InvalidKenoConfig as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/bonuses/fraud-candidates")
 async def referral_fraud_candidates(
     admin: Annotated[AdminSession, Depends(require("bonuses:view_fraud_signals"))],

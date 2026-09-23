@@ -591,3 +591,65 @@ async def withdraw_from_reserve_admin(
                 after={"balance": str(resulting_balance)}, reason=reason, ip_address=ip_address,
             )
     return {"balance": str(resulting_balance)}
+
+
+# ---------------------------------------------------------------------------
+# Staged-launch beta allowlist (2026-09-23, a CTO review's own required
+# gate before any Stage 1). Current membership only -- who's allowed to
+# play right now, not a versioned history of who was ever allowed; every
+# add/remove is itself audited in admin_audit_log below, which is
+# already the platform's record of "who did what, when."
+# ---------------------------------------------------------------------------
+
+
+async def list_beta_allowlist_admin(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, added_by_admin_id, reason, created_at FROM keno_beta_allowlist ORDER BY created_at DESC"
+        )
+    return [_json_safe(row) for row in rows]
+
+
+async def add_to_beta_allowlist_admin(
+    pool: asyncpg.Pool, *, admin_id: int, user_id: int, reason: str, ip_address: str | None = None
+) -> dict[str, Any]:
+    if not reason.strip():
+        raise InvalidKenoConfig("reason is required")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            user = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+            if user is None:
+                raise InvalidKenoConfig(f"no such user: {user_id}")
+            row = await conn.fetchrow(
+                "INSERT INTO keno_beta_allowlist (user_id, added_by_admin_id, reason) VALUES ($1, $2, $3) "
+                "ON CONFLICT (user_id) DO UPDATE SET added_by_admin_id = $2, reason = $3, created_at = now() "
+                "RETURNING user_id, added_by_admin_id, reason, created_at",
+                user_id, admin_id, reason,
+            )
+            assert row is not None
+            await audit.record(
+                conn, admin_id=admin_id, action="keno.beta_allowlist.add", target_type="keno_beta_allowlist",
+                target_id=str(user_id), before=None, after=_json_safe(row), reason=reason, ip_address=ip_address,
+            )
+    return _json_safe(row)
+
+
+async def remove_from_beta_allowlist_admin(
+    pool: asyncpg.Pool, *, admin_id: int, user_id: int, reason: str, ip_address: str | None = None
+) -> dict[str, Any]:
+    if not reason.strip():
+        raise InvalidKenoConfig("reason is required")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT user_id, added_by_admin_id, reason, created_at FROM keno_beta_allowlist WHERE user_id = $1",
+                user_id,
+            )
+            result = await conn.execute("DELETE FROM keno_beta_allowlist WHERE user_id = $1", user_id)
+            removed = result == "DELETE 1"
+            await audit.record(
+                conn, admin_id=admin_id, action="keno.beta_allowlist.remove", target_type="keno_beta_allowlist",
+                target_id=str(user_id), before=_json_safe(before) if before else None, after=None,
+                reason=reason, ip_address=ip_address,
+            )
+    return {"removed": removed}

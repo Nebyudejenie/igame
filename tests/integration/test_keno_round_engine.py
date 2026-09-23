@@ -45,8 +45,8 @@ async def _seed_fast_config_and_tier(
             (version, round_cycle_seconds, betting_seconds, draw_seconds, result_seconds,
              min_picks, max_picks, draw_count, number_pool_size,
              max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled,
-             effective_from)
-        VALUES ($1, 10, $2, $3, $4, 1, 5, 20, 80, 5, 5000, true, now() - interval '1 second')
+             beta_restricted, effective_from)
+        VALUES ($1, 10, $2, $3, $4, 1, 5, 20, 80, 5, 5000, true, false, now() - interval '1 second')
         """,
         version,
         betting_seconds,

@@ -41,6 +41,18 @@ class KenoDisabled(TicketRejected):
     code = "keno_disabled"
 
 
+class NotOnBetaAllowlist(TicketRejected):
+    """A staged launch's allowlist (2026-09-23, spec-adjacent -- a CTO
+    review's own required Stage 1/2 gate) is still restricting access
+    and this user isn't on it. Distinct from KenoDisabled: keno_enabled
+    can be true (the game is genuinely running, real rounds are
+    settling) while a specific user is still not allowed in yet -- the
+    two states are independently meaningful for anyone reading the
+    audit trail or debugging a rejection."""
+
+    code = "keno_not_on_allowlist"
+
+
 class RoundNotAcceptingBets(TicketRejected):
     code = "round_not_accepting_bets"
 
@@ -229,6 +241,8 @@ async def _place_ticket(
             config = await keno_config.load_active_config(conn)
             if not config["keno_enabled"]:
                 raise KenoDisabled()
+            if not await keno_config.is_user_allowed_to_play(conn, user_id, config):
+                raise NotOnBetaAllowlist()
 
             round_row = await conn.fetchrow(
                 "SELECT id, status, tier_id, config_id, total_stake, ticket_count "
@@ -274,9 +288,12 @@ async def _place_ticket(
             exposure_check = keno_exposure.check_round_exposure(
                 current_total_expected_payout=Decimal(round_accumulators["total_expected_payout"]),
                 current_total_payout_variance=Decimal(round_accumulators["total_payout_variance"]),
+                current_total_stake=Decimal(round_row["total_stake"]),
                 new_ticket=ticket_risk,
+                new_ticket_stake=stake,
                 reserve_balance=reserve_balance,
                 max_round_exposure_pct=tier["max_round_exposure_pct"],
+                jackpot_diversion_bps=config["jackpot_diversion_bps"],
             )
             if not exposure_check.allowed:
                 raise RoundCapacityReached(str(exposure_check.projected_exposure))

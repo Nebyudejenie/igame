@@ -118,6 +118,17 @@ def estimate_percentile_exposure(
 @dataclass(frozen=True)
 class ExposureCheck:
     projected_exposure: Decimal
+    """NET exposure: the estimated 99.9th-percentile aggregate PAYOUT,
+    minus the stakes this round has already collected into the reserve
+    (net of the jackpot diversion, which never lands in the reserve at
+    all). This is the quantity actually compared against `ceiling` --
+    see this function's own docstring for why netting the funding side
+    is the economically correct comparison, not the gross payout alone."""
+    gross_exposure: Decimal
+    """The estimated 99.9th-percentile aggregate payout with nothing
+    netted out -- kept for dashboard/observability only (it's a more
+    intuitive "how big could the payout get" figure for a human reading
+    a chart), never compared against `ceiling` itself."""
     ceiling: Decimal
     allowed: bool
 
@@ -126,23 +137,77 @@ def check_round_exposure(
     *,
     current_total_expected_payout: Decimal,
     current_total_payout_variance: Decimal,
+    current_total_stake: Decimal,
     new_ticket: TicketRiskContribution,
+    new_ticket_stake: Decimal,
     reserve_balance: Decimal,
     max_round_exposure_pct: Decimal,
+    jackpot_diversion_bps: int,
 ) -> ExposureCheck:
     """The Part 7.3 gate itself: would accepting this ticket push the
-    round's estimated 99.9th-percentile exposure past
-    reserve * max_round_exposure_pct? Pure function -- the caller
-    (keno_tickets.place_ticket) is responsible for reading the current
-    accumulators/reserve_balance inside the same locked transaction that
-    will apply the result, so the check-then-act is atomic per round."""
+    round's estimated 99.9th-percentile NET exposure -- payout minus
+    the stakes that fund it -- past reserve * max_round_exposure_pct?
+    Pure function -- the caller (keno_tickets.place_ticket) is
+    responsible for reading the current accumulators/reserve_balance
+    inside the same locked transaction that will apply the result, so
+    the check-then-act is atomic per round.
+
+    ## Why net, not gross (a real capacity bug found and fixed 2026-09-23)
+
+    The original version of this function compared *gross* projected
+    payout against the ceiling, never netting out the stakes that fund
+    that payout -- even though every stake is credited into the
+    reserve the instant its ticket is accepted (packages.core.
+    keno_tickets.place_ticket's own ledger.post call), before the round
+    ever settles. That made the ceiling far stricter than the reserve's
+    actual risk: at a 20,000 ETB reserve (ceiling 2,000, pick=5, 50 ETB
+    stakes), gross exposure accepted only ~20 tickets per round --
+    with anything beyond a few hundred concurrent players, almost
+    everyone would be rejected every round. A real, launch-blocking
+    capacity problem, caught by a CTO review before go-live, not a
+    tuning detail.
+
+    The reserve's *actual* net cost from this round, at the 99.9th
+    percentile, is `gross_payout_estimate - stakes_collected_this_round`
+    (stakes net of the jackpot diversion, which is credited to a
+    *separate* ledger account and never lands in the reserve at all).
+    Verified directly against the real seeded low_variance paytables
+    (packages/core/keno.py's own exact math, not approximated): for
+    every pick count 1-5, this net figure has a genuine, finite peak
+    (between roughly 1,460 and 1,910 ETB, at 177-228 tickets) and then
+    *decreases* as more tickets join a round -- the house edge accrues
+    linearly in ticket count while payout variance's standard deviation
+    only grows as its square root, so once enough tickets have pooled,
+    the round is profitable at high confidence regardless of how many
+    more tickets join. This is the same Central-Limit-Theorem
+    diversification this module's own docstring already describes for
+    the gross side; the bug was never applying it to what the round
+    actually costs the reserve net of its own funding.
+
+    This does not remove the guardrail, it corrects its target: a
+    round with a genuinely bad paytable (RTP miscalibrated above 100%,
+    for instance) still has unboundedly growing net exposure as more
+    tickets join, and is still correctly rejected past the ceiling --
+    verified by test_check_round_exposure_still_rejects_a_bad_paytable
+    in tests/unit/test_keno_exposure.py. What it no longer does is
+    reject a *normal, correctly-priced* round for having "too many"
+    players, which gross exposure was doing by nearly two orders of
+    magnitude at realistic launch reserve sizes.
+    """
     projected_expected = current_total_expected_payout + new_ticket.expected_payout
     projected_variance = current_total_payout_variance + new_ticket.payout_variance
-    projected_exposure = estimate_percentile_exposure(
+    gross_exposure = estimate_percentile_exposure(
         total_expected_payout=projected_expected, total_payout_variance=projected_variance
     )
+    projected_stake = current_total_stake + new_ticket_stake
+    reserve_credited = (projected_stake * (Decimal(10000) - Decimal(jackpot_diversion_bps)) / Decimal(10000)).quantize(
+        Decimal("0.01")
+    )
+    net_exposure = gross_exposure - reserve_credited
     ceiling = (reserve_balance * max_round_exposure_pct).quantize(Decimal("0.01"))
-    return ExposureCheck(projected_exposure=projected_exposure, ceiling=ceiling, allowed=projected_exposure <= ceiling)
+    return ExposureCheck(
+        projected_exposure=net_exposure, gross_exposure=gross_exposure, ceiling=ceiling, allowed=net_exposure <= ceiling
+    )
 
 
 def check_per_user_round_share(

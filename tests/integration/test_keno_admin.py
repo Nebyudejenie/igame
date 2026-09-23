@@ -12,6 +12,7 @@ import pytest
 
 from packages.core import keno, ledger
 from services.admin import keno_queries
+from tests.integration.conftest import create_funded_user
 from tests.integration.test_admin_app import _auth_headers
 from tests.integration.test_admin_auth import create_test_admin
 
@@ -359,3 +360,105 @@ async def test_risk_of_ruin_endpoint_rejects_invalid_input_with_422(admin_server
             f"{admin_server}/keno/risk-of-ruin", headers=headers, json=_sim_body(num_simulations=0)
         )
     assert response.status_code == 422
+
+
+# --- staged-launch beta allowlist (2026-09-23) -------------------------------
+
+
+async def test_add_to_beta_allowlist_is_audited(pool, conn):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    user_id = await create_funded_user(conn, Decimal("0"))
+
+    result = await keno_queries.add_to_beta_allowlist_admin(
+        pool, admin_id=admin_id, user_id=user_id, reason="internal Stage 1 tester"
+    )
+    assert result["user_id"] == user_id
+
+    listed = await keno_queries.list_beta_allowlist_admin(pool)
+    assert any(row["user_id"] == user_id for row in listed)
+
+    row = await conn.fetchrow(
+        "SELECT * FROM admin_audit_log WHERE action = 'keno.beta_allowlist.add' AND target_id = $1 "
+        "ORDER BY id DESC LIMIT 1",
+        str(user_id),
+    )
+    assert row["admin_id"] == admin_id
+    assert row["reason"] == "internal Stage 1 tester"
+
+
+async def test_add_to_beta_allowlist_requires_a_reason(pool, conn):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    user_id = await create_funded_user(conn, Decimal("0"))
+    with pytest.raises(keno_queries.InvalidKenoConfig):
+        await keno_queries.add_to_beta_allowlist_admin(pool, admin_id=admin_id, user_id=user_id, reason="  ")
+
+
+async def test_add_to_beta_allowlist_rejects_unknown_user(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(keno_queries.InvalidKenoConfig):
+        await keno_queries.add_to_beta_allowlist_admin(pool, admin_id=admin_id, user_id=999_999_999, reason="x")
+
+
+async def test_remove_from_beta_allowlist_is_audited(pool, conn):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    user_id = await create_funded_user(conn, Decimal("0"))
+    await keno_queries.add_to_beta_allowlist_admin(pool, admin_id=admin_id, user_id=user_id, reason="add first")
+
+    result = await keno_queries.remove_from_beta_allowlist_admin(
+        pool, admin_id=admin_id, user_id=user_id, reason="Stage 1 wrapped up"
+    )
+    assert result == {"removed": True}
+
+    listed = await keno_queries.list_beta_allowlist_admin(pool)
+    assert not any(row["user_id"] == user_id for row in listed)
+
+    row = await conn.fetchrow(
+        "SELECT * FROM admin_audit_log WHERE action = 'keno.beta_allowlist.remove' AND target_id = $1 "
+        "ORDER BY id DESC LIMIT 1",
+        str(user_id),
+    )
+    assert row["admin_id"] == admin_id
+    assert row["reason"] == "Stage 1 wrapped up"
+
+    # Removing again is a clean no-op, not an error -- same idempotent
+    # -delete convention as every other admin remove/stop endpoint in
+    # this codebase.
+    result_again = await keno_queries.remove_from_beta_allowlist_admin(
+        pool, admin_id=admin_id, user_id=user_id, reason="already gone"
+    )
+    assert result_again == {"removed": False}
+
+
+async def test_beta_allowlist_endpoints_require_keno_configure_not_just_view(admin_server, pool, conn):
+    user_id = await create_funded_user(conn, Decimal("0"))
+    view_only_headers = await _auth_headers(admin_server, pool, role="support")  # keno:view, not keno:configure
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/keno/beta-allowlist", headers=view_only_headers,
+            json={"user_id": user_id, "reason": "should be forbidden"},
+        )
+    assert response.status_code == 403
+
+
+async def test_beta_allowlist_add_list_remove_over_http(admin_server, pool, conn):
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    user_id = await create_funded_user(conn, Decimal("0"))
+
+    async with httpx.AsyncClient() as client:
+        added = await client.post(
+            f"{admin_server}/keno/beta-allowlist", headers=headers,
+            json={"user_id": user_id, "reason": "http add test"},
+        )
+    assert added.status_code == 200, added.text
+
+    async with httpx.AsyncClient() as client:
+        listed = await client.get(f"{admin_server}/keno/beta-allowlist", headers=headers)
+    assert listed.status_code == 200
+    assert any(row["user_id"] == user_id for row in listed.json())
+
+    async with httpx.AsyncClient() as client:
+        removed = await client.delete(
+            f"{admin_server}/keno/beta-allowlist/{user_id}", headers=headers, params={"reason": "http remove test"}
+        )
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"removed": True}

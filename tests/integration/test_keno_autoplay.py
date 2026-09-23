@@ -60,8 +60,9 @@ async def _seed_keno_round(conn: asyncpg.Connection, *, max_round_exposure_pct: 
         """
         INSERT INTO keno_configs
             (version, round_cycle_seconds, betting_seconds, draw_seconds, result_seconds,
-             max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled)
-        VALUES ($1, 45, 25, 12, 8, 5, 5000, true)
+             max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled,
+             beta_restricted)
+        VALUES ($1, 45, 25, 12, 8, 5, 5000, true, false)
         RETURNING id
         """,
         version,

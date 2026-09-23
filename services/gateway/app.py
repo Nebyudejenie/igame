@@ -474,8 +474,15 @@ def _client_ip(request: Request) -> str:
 
 @app.get("/api/keno/state")
 async def api_keno_state(authorization: str = Header(default="")) -> dict[str, Any]:
-    await _authenticated_user_id(authorization)
-    state = await keno_queries.game_center_state(app.state.pool)
+    user_id = await _authenticated_user_id(authorization)
+    # Deliberately the identical 503/keno_not_configured response
+    # whether Keno has never been configured at all, or it's configured
+    # and running but this specific user isn't allowed to play yet (a
+    # staged launch's allowlist) -- see game_center_state()'s own
+    # docstring. A different status code for the two cases would itself
+    # leak "Keno exists, you're just not invited" to a user who
+    # shouldn't be able to tell the difference from the response alone.
+    state = await keno_queries.game_center_state(app.state.pool, user_id)
     if state is None:
         raise HTTPException(status_code=503, detail="keno_not_configured")
     return state

@@ -44,6 +44,25 @@ async def load_current_tier(conn: ledger.AsyncpgConnection) -> asyncpg.Record:
     return row
 
 
+async def is_user_allowed_to_play(conn: ledger.AsyncpgConnection, user_id: int, config: asyncpg.Record) -> bool:
+    """Whether this specific user may see live round state or place a
+    ticket right now -- both keno_enabled AND, while a staged launch is
+    still restricting access, allowlist membership. Both
+    packages.core.keno_queries.game_center_state (visibility) and
+    packages.core.keno_tickets.place_ticket (betting) must call this
+    exact function rather than reimplementing the check -- a 2026-09-23
+    CTO review found the visibility side had drifted from the betting
+    side (the state endpoint never checked keno_enabled at all), and a
+    single shared check is how that class of drift gets structurally
+    prevented going forward, not just fixed once."""
+    if not config["keno_enabled"]:
+        return False
+    if not config["beta_restricted"]:
+        return True
+    row = await conn.fetchrow("SELECT 1 FROM keno_beta_allowlist WHERE user_id = $1", user_id)
+    return row is not None
+
+
 async def load_active_paytable(conn: ledger.AsyncpgConnection, pick_count: int, profile: str) -> asyncpg.Record:
     row = await conn.fetchrow(
         "SELECT * FROM keno_paytables WHERE pick_count = $1 AND profile = $2 "

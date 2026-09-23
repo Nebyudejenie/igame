@@ -43,26 +43,143 @@ def test_estimate_percentile_exposure_handles_zero_variance() -> None:
 def test_check_round_exposure_allows_under_ceiling_and_blocks_over() -> None:
     # Small ticket against a large reserve -> comfortably allowed.
     multipliers = {1: Decimal("3.40")}
-    ticket = keno_exposure.compute_ticket_risk_contribution(1, multipliers, stake=Decimal("10"))
+    stake = Decimal("10")
+    ticket = keno_exposure.compute_ticket_risk_contribution(1, multipliers, stake=stake)
     allowed = keno_exposure.check_round_exposure(
         current_total_expected_payout=Decimal(0),
         current_total_payout_variance=Decimal(0),
+        current_total_stake=Decimal(0),
         new_ticket=ticket,
+        new_ticket_stake=stake,
         reserve_balance=Decimal("40000"),
         max_round_exposure_pct=Decimal("0.05"),
+        jackpot_diversion_bps=150,
     )
     assert allowed.allowed is True
     assert allowed.ceiling == Decimal("2000.00")
+    # net must be strictly less than gross once any stake has been
+    # collected -- the entire point of this check.
+    assert allowed.projected_exposure < allowed.gross_exposure
 
-    # The identical ticket against a near-zero reserve -> blocked.
+    # The identical ticket against a near-zero reserve -> blocked (the
+    # ceiling itself is a fraction of a cent; no realistic net exposure
+    # fits under it).
     blocked = keno_exposure.check_round_exposure(
         current_total_expected_payout=Decimal(0),
         current_total_payout_variance=Decimal(0),
+        current_total_stake=Decimal(0),
         new_ticket=ticket,
+        new_ticket_stake=stake,
         reserve_balance=Decimal("1"),
         max_round_exposure_pct=Decimal("0.05"),
+        jackpot_diversion_bps=150,
     )
     assert blocked.allowed is False
+
+
+def test_check_round_exposure_nets_out_collected_stakes() -> None:
+    """The real capacity bug found by a CTO review before go-live,
+    2026-09-23: the original version of this function compared *gross*
+    projected payout against the ceiling, never netting out the stakes
+    that fund it -- even though every stake is credited into the
+    reserve the instant its ticket is accepted, before the round ever
+    settles. At a 20,000 ETB reserve (ceiling 2,000 at 10%), the real
+    launch pick=5 low_variance paytable, 50 ETB stakes, the gross
+    -exposure version accepted only ~20 tickets per round -- a genuine
+    launch-blocking capacity problem at realistic player counts.
+
+    This test proves the fix directly: replay accepting tickets one at
+    a time (mirroring keno_tickets.place_ticket's own accumulation),
+    and confirm that acceptance now continues far past where the old
+    gross check would have cut it off, while gross_exposure alone
+    (computed identically either way) documents exactly how much
+    stricter the old check was."""
+    multipliers = {1: Decimal("0.19"), 2: Decimal("0.97"), 3: Decimal("3.89"), 4: Decimal("11.67"), 5: Decimal("16.00")}
+    stake = Decimal("50")
+    reserve_balance = Decimal("20000")
+    max_round_exposure_pct = Decimal("0.10")
+    jackpot_diversion_bps = 150
+
+    total_expected = Decimal(0)
+    total_variance = Decimal(0)
+    total_stake = Decimal(0)
+    accepted = 0
+    last_check = None
+    for _ in range(500):
+        ticket = keno_exposure.compute_ticket_risk_contribution(5, multipliers, stake=stake)
+        check = keno_exposure.check_round_exposure(
+            current_total_expected_payout=total_expected,
+            current_total_payout_variance=total_variance,
+            current_total_stake=total_stake,
+            new_ticket=ticket,
+            new_ticket_stake=stake,
+            reserve_balance=reserve_balance,
+            max_round_exposure_pct=max_round_exposure_pct,
+            jackpot_diversion_bps=jackpot_diversion_bps,
+        )
+        if not check.allowed:
+            last_check = check
+            break
+        accepted += 1
+        total_expected += ticket.expected_payout
+        total_variance += ticket.payout_variance
+        total_stake += stake
+
+    # The old gross-only check accepted ~20 tickets here (verified by
+    # direct simulation during the review); net exposure's own
+    # documented peak for this exact paytable is ~1,910 ETB at ~228
+    # tickets -- comfortably under a 2,000 ceiling -- so acceptance
+    # should run for hundreds of tickets, not stop at a couple dozen.
+    assert accepted > 400, f"only {accepted} tickets accepted -- net exposure fix did not take effect"
+    # Confirms the rejection, when it eventually happens (or would
+    # happen at higher n), is a real net-exposure comparison, not
+    # accidentally always-true: gross_exposure was already far past
+    # the ceiling long before this point.
+    if last_check is not None:
+        assert last_check.gross_exposure > last_check.ceiling
+
+
+def test_check_round_exposure_still_rejects_a_bad_paytable() -> None:
+    """The net-exposure fix must not gut the guardrail entirely: a
+    paytable priced with no real house edge (RTP effectively ~100%+)
+    must still be rejected once enough tickets accumulate, since net
+    exposure for a *bad* paytable keeps growing without the bound a
+    correctly-priced one has -- proving this is a genuine economic
+    correction, not a removal of the check."""
+    # A deliberately mispriced pick=1 table -- pays out its full stake
+    # back with certainty-ish odds (1/80 pool, drawn 20/80 -> P(hit) =
+    # 20/80 = 25%), multiplier 5.00 means RTP = 0.25 * 5.00 = 125%: a
+    # real bug, not a realistic launch table (compare against the real
+    # 3.28 launch multiplier for pick=1, RTP=82%).
+    multipliers = {1: Decimal("5.00")}
+    stake = Decimal("50")
+    reserve_balance = Decimal("20000")
+    max_round_exposure_pct = Decimal("0.10")
+
+    total_expected = Decimal(0)
+    total_variance = Decimal(0)
+    total_stake = Decimal(0)
+    accepted = 0
+    for _ in range(5000):
+        ticket = keno_exposure.compute_ticket_risk_contribution(1, multipliers, stake=stake)
+        check = keno_exposure.check_round_exposure(
+            current_total_expected_payout=total_expected,
+            current_total_payout_variance=total_variance,
+            current_total_stake=total_stake,
+            new_ticket=ticket,
+            new_ticket_stake=stake,
+            reserve_balance=reserve_balance,
+            max_round_exposure_pct=max_round_exposure_pct,
+            jackpot_diversion_bps=150,
+        )
+        if not check.allowed:
+            break
+        accepted += 1
+        total_expected += ticket.expected_payout
+        total_variance += ticket.payout_variance
+        total_stake += stake
+
+    assert accepted < 5000, "a paytable with no real house edge was never rejected -- guardrail did not fire"
 
 
 def test_check_round_exposure_aggregates_many_small_tickets_without_reaching_worst_case() -> None:

@@ -16,15 +16,36 @@ import asyncpg
 from packages.core import keno, keno_config, ledger
 
 
-async def game_center_state(pool: asyncpg.Pool) -> dict[str, Any] | None:
+async def game_center_state(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | None:
     """The Game Center / current-round summary Part 10's "current round"
     endpoint needs: status, timestamps, server time, seed hash, offered
     picks/stakes (from the round's own pinned tier, never the live
     "current" tier -- Part 6.2's "an admin editing... must not alter
     in-flight" rule applies here too), and the live jackpot pool. Returns
-    None only if Keno has literally never been configured/no round has
-    ever been created (a genuinely fresh, un-configured deployment)."""
+    None if Keno has never been configured/no round has ever been
+    created (a genuinely fresh, un-configured deployment) -- OR, since
+    2026-09-23, if keno_enabled is false or this specific user isn't
+    allowed to play yet (a staged launch's allowlist, still restricting
+    access). Both cases return the identical None/"not available"
+    signal to the caller deliberately: a user who isn't allowed in yet
+    should not be able to distinguish "Keno doesn't exist" from "Keno
+    exists but you're not in" from the response shape alone. A real bug
+    this exact check fixed: this function used to return the full live
+    payload to *any* authenticated user the instant a single round had
+    ever been created, never checking keno_enabled at all -- found by a
+    CTO review, not by this function's own (until-then nonexistent)
+    tests."""
     async with pool.acquire() as conn:
+        # Deliberately the *currently* active config for the
+        # authorization check (is this user allowed in right now), kept
+        # separate from the round-pinned `config` fetched below (what
+        # this specific round actually offered) -- the same "an admin
+        # editing must not alter in-flight" split every other Keno
+        # config read already respects.
+        active_config = await keno_config.load_active_config(conn)
+        if not await keno_config.is_user_allowed_to_play(conn, user_id, active_config):
+            return None
+
         round_row = await conn.fetchrow(
             "SELECT * FROM keno_rounds WHERE status NOT IN ('completed','failed','voided') "
             "ORDER BY id DESC LIMIT 1"

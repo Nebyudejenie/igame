@@ -47,8 +47,8 @@ async def _seed_fast_config_and_tier(conn: asyncpg.Connection) -> None:
             (version, round_cycle_seconds, betting_seconds, draw_seconds, result_seconds,
              min_picks, max_picks, draw_count, number_pool_size,
              max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled,
-             effective_from)
-        VALUES ($1, 10, 3, 2, 2, 1, 5, 20, 80, 5, 5000, true, now() - interval '1 second')
+             beta_restricted, effective_from)
+        VALUES ($1, 10, 3, 2, 2, 1, 5, 20, 80, 5, 5000, true, false, now() - interval '1 second')
         """,
         version,
     )
