@@ -39,7 +39,9 @@ def _next_version() -> int:
 _MULTIPLIERS = {1: Decimal("3.40")}
 
 
-async def _seed_fast_config_and_tier(conn: asyncpg.Connection) -> None:
+async def _seed_fast_config_and_tier(
+    conn: asyncpg.Connection, *, keno_enabled: bool = True, beta_restricted: bool = False
+) -> None:
     version = _next_version()
     await conn.execute(
         """
@@ -48,9 +50,11 @@ async def _seed_fast_config_and_tier(conn: asyncpg.Connection) -> None:
              min_picks, max_picks, draw_count, number_pool_size,
              max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled,
              beta_restricted, effective_from)
-        VALUES ($1, 10, 3, 2, 2, 1, 5, 20, 80, 5, 5000, true, false, now() - interval '1 second')
+        VALUES ($1, 10, 3, 2, 2, 1, 5, 20, 80, 5, 5000, $2, $3, now() - interval '1 second')
         """,
         version,
+        keno_enabled,
+        beta_restricted,
     )
     tier_id = await conn.fetchval(
         """
@@ -277,3 +281,58 @@ async def test_keno_screen_full_flow_bet_to_result_over_a_real_browser(gateway_s
     # (balance up by payout - 10) -- either way real money genuinely
     # moved through the real ledger for this real ticket.
     assert balance_after["cash"] != balance_before["cash"]
+
+
+async def test_keno_button_stays_cleanly_hidden_for_a_non_allowlisted_user(gateway_server, pool, redis, browser, conn):
+    """The exact scenario a CTO review asked to see with a screenshot,
+    not just a passing assertion: keno_enabled=true (the game is
+    genuinely running -- real rounds exist, see the DB check below) but
+    this specific user isn't on the beta allowlist. The button must
+    stay hidden cleanly -- no console error, no stuck spinner, no
+    flash of the button before it disappears -- not merely "the API
+    call fails and something downstream happens to look okay."""
+    await _seed_fast_config_and_tier(conn, keno_enabled=True, beta_restricted=True)
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id, first_name="NotAllowlisted")
+
+    async with pool.acquire() as setup_conn:
+        user_id = await create_funded_user(setup_conn, Decimal("1000.00"))
+    await pool.execute("UPDATE users SET telegram_id = $1 WHERE id = $2", telegram_id, user_id)
+
+    engine = KenoRoundEngine(pool, redis)
+    engine_task = asyncio.create_task(engine.run_forever())
+    try:
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+
+        # The app must still reach its own normal "ready" state --
+        # proving nothing is stuck waiting on the Keno check specifically
+        # (that would be the "stuck spinner" failure mode: a broken gate
+        # that also wedges the rest of the page, not a clean hide).
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('1000')", timeout=10000
+        )
+
+        # A real round genuinely exists and keno_enabled is genuinely
+        # true -- this isn't "hidden because nothing exists yet," it's
+        # "hidden because this user specifically isn't allowed in."
+        round_row = await pool.fetchrow("SELECT id FROM keno_rounds ORDER BY id DESC LIMIT 1")
+        assert round_row is not None
+        config_row = await pool.fetchrow("SELECT keno_enabled FROM keno_configs ORDER BY effective_from DESC LIMIT 1")
+        assert config_row["keno_enabled"] is True
+
+        # checkKenoAvailability() fires once, right after boot, with no
+        # visible loading state of its own -- give it a real moment to
+        # land, then assert the settled state rather than racing it.
+        await page.wait_for_timeout(1500)
+
+        is_hidden = await page.evaluate("document.getElementById('open-keno-btn').classList.contains('hidden')")
+        assert is_hidden, "Keno button is visible to a non-allowlisted user"
+
+        await page.screenshot(path="/tmp/keno-button-hidden-not-allowlisted.png")
+        assert console_errors == [], f"JS errors while checking Keno availability: {console_errors}"
+    finally:
+        await page.close()
+        engine.stop()
+        await asyncio.wait_for(engine_task, timeout=15.0)
