@@ -486,17 +486,83 @@ been pushed to `igame` until now:
   row, `keno_enabled = false` — the backend is live and running, but
   the game is still fully gated off from real players.
 
-**Still open on the Part 7 gate:**
-- `scripts/verify-round.ts` and 11 of 12 required `docs/keno/*.md` files
-  (only this one and `00-discovery.md` exist).
-- The one real remaining decision: how much actual capital to seed
-  `keno_reserve` with. Not touched — real money, needs the operator's
-  own number, shown and confirmed before anything is posted, same
-  standing rule as every other real-money action this session.
-- The actual go-live moment (flipping `keno_enabled`, un-hiding the Mini
-  App button) — a separate, explicit decision regardless of how ready
-  everything else is, not something that follows automatically from
-  finishing the checklist above.
+## 2026-09-23 (later same day) — Docs backlog closed: all 13 Part 19 docs + verify-round.ts
 
-**Next step**: the docs backlog and the two operator-only decisions
-(reserve funding amount, go-live flip) are all that's left.
+Wrote all 12 remaining required docs (`01`–`12`) and
+`scripts/verify-round.ts`, grounded directly in the actual code (read
+the real engine, ticket-placement, exposure, and migration source for
+each one) rather than summarized from memory or invented. Two real
+bugs surfaced along the way, both handled as real engineering work, not
+folded silently into "documentation":
+
+1. **Fixed, committed, pushed to `igame` — not yet deployed to
+   production.** `keno_jackpot_pool`'s singleton metadata row was never
+   seeded by any prior migration (confirmed directly against the
+   production database: zero rows). `_pay_jackpot()` handles this
+   gracefully — returns 0, never crashes — but that also meant the
+   jackpot could structurally never be paid out, even after real stake
+   contributions grew its ledger balance, until this row existed.
+   Migration `f1a9d4c7e2b5` seeds only `account_id`; `cap_amount` stays
+   uncapped and `seed_amount` stays 0 — both real money/product
+   decisions left untouched. Verified with a real up/down/up cycle
+   locally before committing.
+2. **Flagged, not fixed** — all 11 of Part 8's revenue/cohort metrics
+   (`keno_dau`, `keno_hold_pct`, `keno_arpdau`, retention, LTV, deposit
+   conversion, session duration) are declared in `metrics.py` but
+   nothing anywhere sets any of them; checked directly, not assumed.
+   Real engineering work (deciding what a "session" is, where cohorts
+   are tracked from), not something to invent while writing docs.
+
+Also found, while checking the admin surface for `09-admin-guide.md`,
+that **no admin web UI exists for Keno at all** — `web/admin/` has zero
+Keno references; only the player-facing Mini App has Keno screens.
+Every admin action is API-only today. The admin guide documents this
+honestly (bilingual, English + Amharic) with runnable `curl` examples
+for every real endpoint rather than describing buttons that don't
+exist.
+
+`scripts/verify-round.ts` — a standalone, dependency-free (Node
+`crypto` only) TypeScript port of the commit-reveal draw — was
+cross-validated against the real Python implementation with 4 random
+seed/draw vectors (all byte-for-byte matches) plus a negative test
+(correctly reports FAILED on a tampered draw) before being trusted as
+the reference implementation the fairness doc points to. Its `--round`
+convenience-fetch mode was initially wrong (assumed anonymous curl
+would work; the real gateway requires a signed Telegram session on
+every route, platform-wide) — fixed to require `--auth` explicitly with
+a clear error otherwise.
+
+Full real numbers gathered for the two report docs, not estimated: 163
+Keno tests across 14 files, 0 failures (153 default + 1 real-Chromium
+e2e + 6 large-N statistical + 3 load/chaos), mypy strict clean. The
+load/chaos report documents two genuine investigation stories in full:
+the Redis test's own early false-positive (a fast restart never
+actually exercised lock loss) and the orphaned-background-task bug
+that only surfaced when two test files ran together (see the Part 17
+entry above for the fix; the report documents the finding and final
+clean numbers).
+
+**Still open:**
+- The `keno_jackpot_pool` seed migration (`f1a9d4c7e2b5`) needs
+  deploying to production — should ship alongside or before the
+  `keno_enabled` go-live flip, not after.
+- Part 8's revenue/cohort metrics computation is entirely unbuilt
+  (gauges declared, nothing populates them).
+- No admin web UI for Keno exists — API-only today.
+- No data-retention/purge policy exists anywhere in the codebase
+  (flagged in `12-compliance.md` as an open legal question).
+- The two decisions only the operator can make: how much actual
+  capital to seed `keno_reserve` with (real money — needs the
+  operator's own number, shown and confirmed before anything is
+  posted), and the actual go-live moment (flipping `keno_enabled`,
+  un-hiding the Mini App button) — a separate, explicit decision
+  regardless of how ready everything else is.
+- Regulatory licensing (Ethiopian National Lottery Administration or
+  applicable authority) — explicitly the operator's own legal
+  responsibility, flagged in `12-compliance.md`, not something any of
+  this technical work resolves.
+
+**Next step**: deploy the jackpot-pool-seed migration, then the two
+operator-only decisions (reserve funding amount, go-live flip) are the
+only things left blocking launch. Everything else on the original Part
+7/14/15/17/19 checklist is now done.
