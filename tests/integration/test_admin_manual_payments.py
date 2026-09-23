@@ -212,7 +212,9 @@ async def test_finance_can_approve_manual_deposits_over_http(admin_server, pool,
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=headers, json={"reason": "ok"}
+            f"{admin_server}/manual-deposits/{payment_id}/approve",
+            headers=headers,
+            json={"reason": "receipt matches deposit"},
         )
     assert response.status_code == 200
     assert response.json()["outcome"] == "credited"
@@ -291,7 +293,7 @@ async def test_same_admin_cannot_double_approve_over_http_returns_409(admin_serv
         assert first.json()["outcome"] == "awaiting_second_approval"
 
         second = await client.post(
-            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=headers, json={"reason": "again"}
+            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=headers, json={"reason": "second look"}
         )
     assert second.status_code == 409
     assert second.json()["detail"] == "same_admin_cannot_double_approve"
@@ -310,7 +312,9 @@ async def test_two_different_finance_admins_can_approve_the_same_high_value_depo
 
     async with httpx.AsyncClient() as client:
         first = await client.post(
-            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=first_headers, json={"reason": "ok"}
+            f"{admin_server}/manual-deposits/{payment_id}/approve",
+            headers=first_headers,
+            json={"reason": "receipt matches deposit"},
         )
         assert first.status_code == 200
         assert first.json()["outcome"] == "awaiting_second_approval"
@@ -318,7 +322,7 @@ async def test_two_different_finance_admins_can_approve_the_same_high_value_depo
         second = await client.post(
             f"{admin_server}/manual-deposits/{payment_id}/approve",
             headers=second_headers,
-            json={"reason": "confirmed"},
+            json={"reason": "second confirmation"},
         )
     assert second.status_code == 200
     assert second.json()["outcome"] == "credited"

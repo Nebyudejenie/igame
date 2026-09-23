@@ -121,6 +121,18 @@ async def _unauthenticated_route_ip_allowlist(
     return await call_next(request)
 
 
+# A one-word placeholder passes any non-empty check trivially -- these
+# are the specific words a real admin-adjustment reason on this
+# platform was found to actually contain (2026-09-23's house_float
+# investigation: a real 1,000 ETB balance adjustment recorded with the
+# reason "done"), not a hypothetical or exhaustive list. The real fix
+# is the length floor below; this denylist only exists to catch the
+# exact failure mode already observed, immediately, even at a length
+# that would otherwise clear the floor.
+_LOW_INFORMATION_REASONS = frozenset({"done", "test", "fix", "ok", "n/a", "na", "asdf", "temp", "-", "."})
+_MIN_REASON_LENGTH = 10
+
+
 def _require_reason(reason: str) -> None:
     """Every financially-consequential admin action needs an accountable
     reason on the record (spec: "no hidden god mode") -- a code review
@@ -132,9 +144,30 @@ def _require_reason(reason: str) -> None:
     audit log entry. Every sibling route (reject, void, adjust, set
     -status) already required one; nothing about approving a withdrawal
     is less consequential than rejecting one.
+
+    Strengthened 2026-09-23 after a real audit-trail gap this exact
+    check was supposed to prevent: a 1,000 ETB balance adjustment
+    recorded with the reason "done" -- non-empty, so it passed the
+    original check here, but reconstructable by no one six months
+    later. "done" is not a hypothetical: it's the actual value found on
+    the actual platform. A minimum length, not a longer denylist, is
+    the real fix -- a denylist can only ever catch reasons someone
+    already thought to add, while a length floor structurally rules out
+    the entire class of one-word non-answers ("done", "fixed", "issue",
+    "cleanup"...) without needing to enumerate them. This function is
+    shared by every admin route in this file (27 call sites as of this
+    change, including every keno:configure action) -- one fix here
+    closes the gap everywhere it exists, not just on the one route a
+    2026-09-23 CTO review happened to flag.
     """
-    if not reason.strip():
+    stripped = reason.strip()
+    if not stripped:
         raise HTTPException(status_code=422, detail="reason is required")
+    if stripped.lower() in _LOW_INFORMATION_REASONS or len(stripped) < _MIN_REASON_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reason must be a real, specific explanation (at least {_MIN_REASON_LENGTH} characters)",
+        )
 
 
 async def current_admin(

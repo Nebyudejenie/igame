@@ -234,7 +234,7 @@ async def test_finance_can_grant_a_manual_bonus_over_http(admin_server, pool, co
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{admin_server}/bonuses/grant",
-            json={"user_id": user_id, "amount": "12.00", "reason": "goodwill"},
+            json={"user_id": user_id, "amount": "12.00", "reason": "goodwill gesture"},
             headers=headers,
         )
     assert response.status_code == 200, response.text

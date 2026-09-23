@@ -244,7 +244,9 @@ async def test_finance_can_approve_withdrawals_over_http(admin_server, pool, red
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"{admin_server}/withdrawals/{payment_id}/approve", headers=headers, json={"reason": "ok"}
+            f"{admin_server}/withdrawals/{payment_id}/approve",
+            headers=headers,
+            json={"reason": "identity and amount verified"},
         )
     assert response.status_code == 200
     assert response.json()["approved"] is True

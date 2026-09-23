@@ -174,7 +174,7 @@ async def test_finance_can_view_raw_sms_and_resolve_over_http(admin_server, pool
         resolve_response = await client.post(
             f"{admin_server}/telebirr-evidence/{evidence_id}/resolve",
             headers=headers,
-            json={"to_status": "available", "reason": "verified"},
+            json={"to_status": "available", "reason": "verified against real SMS"},
         )
         assert resolve_response.status_code == 200
         assert resolve_response.json()["resolved"] is True
@@ -188,7 +188,12 @@ async def test_resolve_over_http_rejects_an_invalid_transition_with_422(admin_se
         response = await client.post(
             f"{admin_server}/telebirr-evidence/{evidence_id}/resolve",
             headers=headers,
-            json={"to_status": "blocked", "reason": "test"},
+            # A real, well-formed reason -- this test is about the
+            # invalid-transition rejection specifically, not about
+            # reason validation (see test_resolve_over_http_requires_a_
+            # real_reason below for that), so the reason itself must be
+            # one that would otherwise pass cleanly.
+            json={"to_status": "blocked", "reason": "attempting an invalid transition"},
         )
     assert response.status_code == 422
 

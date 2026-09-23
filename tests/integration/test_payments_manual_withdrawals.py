@@ -360,12 +360,12 @@ async def test_support_cannot_settle_manual_withdrawals_over_http(admin_server, 
         await client.post(
             f"{admin_server}/manual-withdrawals/{payment_id}/approve",
             headers=finance_headers,
-            json={"reason": "ok"},
+            json={"reason": "identity verified"},
         )
         response = await client.post(
             f"{admin_server}/manual-withdrawals/{payment_id}/settle",
             headers=support_headers,
-            json={"external_reference": "TXN-1", "reason": "ok"},
+            json={"external_reference": "TXN-1", "reason": "sent via bank transfer"},
         )
     assert response.status_code == 403
 
@@ -377,7 +377,9 @@ async def test_finance_can_approve_and_settle_manual_withdrawals_over_http(admin
 
     async with httpx.AsyncClient() as client:
         approve_response = await client.post(
-            f"{admin_server}/manual-withdrawals/{payment_id}/approve", headers=headers, json={"reason": "ok"}
+            f"{admin_server}/manual-withdrawals/{payment_id}/approve",
+            headers=headers,
+            json={"reason": "identity verified"},
         )
         assert approve_response.status_code == 200
         assert approve_response.json()["outcome"] == "approved"
@@ -385,7 +387,7 @@ async def test_finance_can_approve_and_settle_manual_withdrawals_over_http(admin
         settle_response = await client.post(
             f"{admin_server}/manual-withdrawals/{payment_id}/settle",
             headers=headers,
-            json={"external_reference": "TXN-2", "reason": "sent"},
+            json={"external_reference": "TXN-2", "reason": "sent via bank transfer"},
         )
     assert settle_response.status_code == 200
     assert settle_response.json()["settled"] is True
@@ -398,12 +400,17 @@ async def test_settle_requires_a_non_blank_external_reference_over_http(admin_se
 
     async with httpx.AsyncClient() as client:
         await client.post(
-            f"{admin_server}/manual-withdrawals/{payment_id}/approve", headers=headers, json={"reason": "ok"}
+            f"{admin_server}/manual-withdrawals/{payment_id}/approve",
+            headers=headers,
+            json={"reason": "identity verified"},
         )
         response = await client.post(
             f"{admin_server}/manual-withdrawals/{payment_id}/settle",
             headers=headers,
-            json={"external_reference": "   ", "reason": "ok"},
+            # A real, well-formed reason -- this test isolates the
+            # external_reference validation specifically, so the reason
+            # itself must be one that would otherwise pass cleanly.
+            json={"external_reference": "   ", "reason": "sent via bank transfer"},
         )
     assert response.status_code == 422
 

@@ -136,6 +136,65 @@ async def test_adjust_balance_over_http_rejects_a_missing_request_id(admin_serve
     assert response.status_code == 422
 
 
+async def test_adjust_balance_over_http_rejects_done_as_a_reason(admin_server, pool, conn):
+    """The exact real gap a 2026-09-23 house_float investigation found:
+    a real 1,000 ETB balance adjustment was recorded with the reason
+    "done" -- non-empty, so the pre-existing check let it through, but
+    reconstructable by no one six months later. This is not a
+    hypothetical placeholder; it's the actual value that was actually
+    found on the actual platform."""
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_funded_user(conn, Decimal("10.00"))
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/users/{user_id}/adjust",
+            headers=headers,
+            json={"amount": "5.00", "reason": "done", "request_id": "test-req-done"},
+        )
+    assert response.status_code == 422
+    assert "reason must be a real, specific explanation" in response.json()["detail"]
+
+    # Rejected, not silently truncated or accepted -- no money moved.
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    assert await ledger.balance(conn, cash.id) == Decimal("10.00")
+
+
+async def test_adjust_balance_over_http_rejects_other_low_information_reasons(admin_server, pool, conn):
+    """"done" is one real example, not the only one -- the same class of
+    one-word non-answer must be rejected regardless of which specific
+    word an admin happens to type."""
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    for placeholder in ("test", "fix", "ok", "n/a", "temp", "short"):
+        user_id = await create_funded_user(conn, Decimal("10.00"))
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{admin_server}/users/{user_id}/adjust",
+                headers=headers,
+                json={"amount": "5.00", "reason": placeholder, "request_id": f"test-req-{placeholder}"},
+            )
+        assert response.status_code == 422, f"{placeholder!r} was wrongly accepted as a reason"
+
+
+async def test_adjust_balance_over_http_accepts_a_real_specific_reason(admin_server, pool, conn):
+    """The fix must not become so strict it rejects genuine, accountable
+    reasons -- only the low-information class above."""
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_funded_user(conn, Decimal("10.00"))
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/users/{user_id}/adjust",
+            headers=headers,
+            json={
+                "amount": "5.00",
+                "reason": "Refunding player per support ticket #4821",
+                "request_id": "test-req-real-reason",
+            },
+        )
+    assert response.status_code == 200, response.text
+
+
 async def test_create_room_rejects_a_malformed_stake_with_a_clean_error(admin_server, pool):
     # A real bug this reproduces: Decimal(str) raises decimal
     # .InvalidOperation, not ValueError -- create_room()'s own

@@ -518,14 +518,17 @@ async def test_simulated_players_routes_full_flow_over_http(admin_server, pool):
             started = await client.post(
                 f"{admin_server}/simulated-players/{user_id}/start",
                 headers=ops_headers,
-                json={"reason": "http test"},
+                json={"reason": "http test start"},
             )
             assert started.status_code == 200
 
             strategy = await client.patch(
                 f"{admin_server}/simulated-players/{user_id}/strategy",
                 headers=ops_headers,
-                json={"strategy": "active", "join_probability_pct": 50, "max_cards_per_join": 2, "reason": "http test"},
+                json={
+                    "strategy": "active", "join_probability_pct": 50, "max_cards_per_join": 2,
+                    "reason": "http test strategy change",
+                },
             )
             assert strategy.status_code == 200
 
@@ -547,7 +550,9 @@ async def test_simulated_players_routes_full_flow_over_http(admin_server, pool):
             bad_confirmation = await client.post(
                 f"{admin_server}/simulated-players/stop-all",
                 headers=superadmin_headers,
-                json={"reason": "http test", "confirmation": "wrong"},
+                # A real, well-formed reason -- this call isolates the
+                # confirmation-mismatch rejection specifically.
+                json={"reason": "http test stop-all", "confirmation": "wrong"},
             )
             assert bad_confirmation.status_code == 422
 

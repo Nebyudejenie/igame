@@ -539,7 +539,9 @@ async def test_stop_room_preview_and_stop_over_http_full_flow(admin_server, pool
         bad_confirmation = await client.post(
             f"{admin_server}/rooms/{room_id}/stop",
             headers=headers,
-            json={"reason": "test", "confirmation": "wrong"},
+            # A real, well-formed reason -- this call isolates the
+            # confirmation-mismatch rejection specifically.
+            json={"reason": "real HTTP end-to-end test", "confirmation": "wrong"},
         )
         assert bad_confirmation.status_code == 422
 
