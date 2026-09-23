@@ -144,6 +144,7 @@ class KenoRoundEngine:
 
     async def _run_one_round(self) -> None:
         await self._recover_stuck_settling_rounds()
+        await self._update_oldest_nonterminal_round_gauge()
         ctx = await self._create_round()
         await self._open_betting(ctx)
         reached_close = await self._run_betting_phase(ctx)
@@ -618,6 +619,25 @@ class KenoRoundEngine:
                 continue  # a real in-flight task already owns this one
             logger.warning("keno_round_settling_recovery_resuming", round_id=round_id)
             self._spawn_settlement(round_id)
+
+    async def _update_oldest_nonterminal_round_gauge(self) -> None:
+        """08-runbook.md's own documented gap: "detection today is
+        manual -- no configured alert for a stuck round." This is that
+        alert's own data source, set once per round cycle (~every
+        round_cycle_seconds) from a real DB read, not inferred from
+        anything in-memory -- a fresh worker after a crash reports the
+        real age immediately on its very first cycle, with no warm-up
+        blind spot. 0 when nothing is non-terminal (the common, healthy
+        case between rounds) rather than leaving the gauge at whatever
+        stale value a previous cycle last set, which would otherwise
+        make a resolved stuck-round look like it's still stuck until the
+        next real update happened to overwrite it."""
+        async with self._pool.acquire() as conn:
+            oldest_age = await conn.fetchval(
+                "SELECT EXTRACT(EPOCH FROM (now() - MIN(scheduled_at))) "
+                "FROM keno_rounds WHERE status NOT IN ('completed', 'failed', 'voided')"
+            )
+        metrics.keno_oldest_nonterminal_round_age_seconds.set(float(oldest_age) if oldest_age is not None else 0.0)
 
     async def _round_age_seconds(self, row: asyncpg.Record) -> float:
         async with self._pool.acquire() as conn:

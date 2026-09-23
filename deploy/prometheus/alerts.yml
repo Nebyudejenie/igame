@@ -151,3 +151,41 @@ groups:
           severity: page
         annotations:
           summary: "Keno reserve balance has hit zero or gone negative -- cannot fund payouts"
+
+      - alert: KenoRoundStuck
+        # 08-runbook.md's own documented gap, closed 2026-09-24:
+        # "detection today is manual -- no configured alert for a
+        # genuinely stuck round." keno_oldest_nonterminal_round_age_
+        # seconds (services/engine/keno_round_engine.py's own
+        # _update_oldest_nonterminal_round_gauge(), set once per round
+        # cycle from a real DB read) is 0 whenever nothing is stuck. The
+        # threshold reuses STUCK_ROUND_THRESHOLD_SECONDS (300) verbatim
+        # -- the exact same real constant recover_on_startup() already
+        # uses to decide "resume" vs. "fail+refund" -- rather than
+        # inventing a second, different number for the same concern.
+        expr: keno_oldest_nonterminal_round_age_seconds > 300
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "A Keno round has been non-terminal for over 5 minutes -- see 08-runbook.md's stuck-round scenario"
+
+      - alert: KenoEngineHeartbeatMissing
+        # The other half of the same runbook gap: "no configured alert
+        # for... a missing engine heartbeat." keno_rounds_created_total
+        # increments every real round cycle (~round_cycle_seconds, 45s
+        # at launch) regardless of keno_enabled -- the engine creates
+        # and cycles rounds whether or not ticket placement is currently
+        # allowed, confirmed directly against production 2026-09-23 (8
+        # real rounds created within minutes of a fresh deploy, well
+        # before keno_enabled was ever considered). 5 minutes is ~6-7x
+        # that cycle length -- comfortable margin against ordinary
+        # jitter (a slow settlement pass, a brief Redis blip the lock
+        # rides out) without waiting so long that a genuinely dead
+        # engine goes unnoticed for an unreasonable stretch.
+        expr: increase(keno_rounds_created_total[5m]) == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "No new Keno round created in 5 minutes -- keno-worker may be down or wedged"

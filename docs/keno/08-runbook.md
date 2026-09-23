@@ -31,10 +31,14 @@ truth, not the log stream. See `01-architecture.md` for why.
 
 ## Scenario: a round looks stuck (status hasn't advanced in a while)
 
-**Detection today is manual** — there is currently no configured
-Prometheus alert for a genuinely stuck round or a missing engine
-heartbeat (a real, open gap against spec Part 19's alert list; see
-"Known gaps" below). Until that's built, check directly:
+**Two alerts now cover this** — `KenoRoundStuck` (fires once a round has
+been non-terminal for over 5 minutes) and `KenoEngineHeartbeatMissing`
+(fires once 5 minutes pass with no new round created at all) — see
+`deploy/prometheus/alerts.yml`. Both still depend on a real Prometheus
+instance actually evaluating them in production, which as of 2026-09-23
+does not exist (see "Known gaps" below) — until that's stood up, or as a
+second check even after it is, the direct queries below remain the
+ground truth:
 
 ```sql
 SELECT id, status, now() - scheduled_at AS age
@@ -163,17 +167,30 @@ Three separate logs, each for a different question:
   domain events, `keno_round_events`, and tier history,
   `keno_tier_changes`, neither of which has a mandatory admin actor).
 
-## Known gaps (as of 2026-09-23)
+## Known gaps (as of 2026-09-24)
 
 Honest, not exhaustive — see each linked doc for more:
 
-- **No configured alert** for a stuck round, a missing engine
-  heartbeat, settlement errors, RTP divergence, unsettled tickets in a
-  completed round, reserve-near-floor, liabilities-near-available-cash,
-  or deposit-failure-spike. Only `KenoRoundExposureHigh` and
-  `KenoReserveDepleted` exist today (`deploy/prometheus/alerts.yml`).
-  Detection for everything else in this runbook is manual, via the
-  queries above, until these are built.
+- **Stuck round and engine heartbeat are now covered** —
+  `KenoRoundStuck`/`KenoEngineHeartbeatMissing`
+  (`deploy/prometheus/alerts.yml`), backed by a real gauge
+  (`keno_oldest_nonterminal_round_age_seconds`, set every round cycle
+  by `services/engine/keno_round_engine.py::
+  _update_oldest_nonterminal_round_gauge()`) and the existing
+  `keno_rounds_created_total` counter. Still no configured alert for
+  settlement errors, RTP divergence, unsettled tickets in a completed
+  round, reserve-near-floor, liabilities-near-available-cash, or
+  deposit-failure-spike. Detection for those remains manual, via the
+  queries elsewhere in this runbook.
+- **A more fundamental gap found while closing the above**: production
+  (`deploy/docker-compose.prod.yml`) runs no Prometheus, Grafana, or
+  Pushgateway at all — those three exist only in the local-dev compose
+  file. Every alert rule this project has (the original 8, these 2, and
+  `LedgerReconciliationMismatch`) is real, `promtool`-validated YAML,
+  but with no Prometheus instance in production to load and evaluate
+  it, none of them can actually fire today. See `docs/ops/
+  vps-migration.md` for the full note — worth resolving as its own
+  piece of work, not assumed fixed by these rules existing.
 - Revenue/cohort analytics metrics are declared but not populated —
   see `07-economics-and-bankroll.md`'s own section on this. Not
   relevant to incident response, but relevant if you're asked "what's

@@ -356,6 +356,21 @@ keno_tier_changes_total = Counter(
     "keno_tier_changes_total", "Tier changes, by trigger", ["trigger"]
 )  # trigger: automated_promotion | automated_demotion | circuit_breaker | admin_override
 
+# Closes 08-runbook.md's own documented gap ("no configured alert for a
+# stuck round or a missing engine heartbeat -- detection today is
+# manual"), 2026-09-24. keno_oldest_nonterminal_round_age_seconds is set
+# every round cycle from services/engine/keno_round_engine.py's own
+# _recover_stuck_settling_rounds() sweep -- 0 when nothing is stuck (no
+# non-terminal round exists, or the newest one is younger than any
+# concerning threshold), real seconds otherwise. keno_rounds_created_total
+# above is the heartbeat signal itself (deploy/prometheus/alerts.yml's
+# KenoEngineHeartbeatMissing watches for it simply not incrementing) --
+# no new counter needed for that one.
+keno_oldest_nonterminal_round_age_seconds = Gauge(
+    "keno_oldest_nonterminal_round_age_seconds",
+    "Age of the oldest non-terminal (not completed/failed/voided) Keno round, in seconds",
+)
+
 # Part 8's six revenue-model terms, instrumented directly rather than
 # only derivable from the counters above -- see docs/keno/07-economics-and-bankroll.md.
 keno_dau = Gauge("keno_dau", "Distinct Keno players in the trailing 24h")

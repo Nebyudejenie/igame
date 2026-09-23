@@ -16,7 +16,7 @@ from decimal import Decimal
 import asyncpg
 import pytest
 
-from packages.core import keno, keno_autoplay, ledger
+from packages.core import keno, keno_autoplay, ledger, metrics
 from services.engine.keno_lock import LOCK_KEY as KENO_LOCK_KEY
 from services.engine.keno_round_engine import KenoRoundEngine
 from tests.integration.conftest import create_funded_user
@@ -576,3 +576,39 @@ async def test_autoplay_session_places_real_tickets_across_real_rounds_and_exhau
     # two real draws actually paid -- a real, independently-checkable
     # ledger balance, not just "no exception was raised."
     assert Decimal(balance["cash"]) == Decimal("1000.00") - Decimal("20.00") + total_payout
+
+
+# --- oldest-nonterminal-round gauge (08-runbook.md's own documented
+# "no configured alert for a stuck round" gap, closed 2026-09-24) --------
+
+
+async def test_oldest_nonterminal_round_gauge_reflects_a_real_stuck_round(pool: asyncpg.Pool, redis) -> None:
+    # Deliberately far older than anything any other test in this shared
+    # dev database could plausibly leave lingering -- makes this round
+    # the real MIN(scheduled_at) regardless of ambient state, so the
+    # assertion doesn't need this file's own cleanup fixture to have run
+    # first.
+    async with pool.acquire() as conn:
+        await _seed_settling_round_with_one_ticket(conn, scheduled_at_offset_seconds=10_000)
+
+    engine = KenoRoundEngine(pool, redis)
+    await engine._update_oldest_nonterminal_round_gauge()
+
+    reported_age = metrics.keno_oldest_nonterminal_round_age_seconds._value.get()
+    # Age only grows between seeding and measurement, never shrinks --
+    # >= the seeded value (with a little headroom for real wall-clock
+    # drift during the test itself) is the correct, non-flaky bound,
+    # not an exact equality that would need perfect timing.
+    assert reported_age >= 10_000
+
+
+async def test_oldest_nonterminal_round_gauge_is_zero_when_nothing_is_stuck(pool: asyncpg.Pool, redis) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE keno_rounds SET status = 'completed' WHERE status NOT IN ('completed', 'failed', 'voided')"
+        )
+
+    engine = KenoRoundEngine(pool, redis)
+    await engine._update_oldest_nonterminal_round_gauge()
+
+    assert metrics.keno_oldest_nonterminal_round_age_seconds._value.get() == 0.0
