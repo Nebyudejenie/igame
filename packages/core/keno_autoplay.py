@@ -33,7 +33,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import keno, keno_tickets
+from packages.core import keno, keno_tickets, responsible_gaming
 
 logger = structlog.get_logger()
 
@@ -56,6 +56,18 @@ class InvalidAutoplayConfig(AutoplayError):
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
+        super().__init__(reason)
+
+
+class AutoplayBlockedByResponsibleGaming(AutoplayError):
+    """The player's own responsible-gaming status would refuse the
+    session's very first ticket. code is responsible_gaming's PlayBlock
+    reason ('self_excluded' | 'banned' | 'cooling_off' |
+    'loss_limit_reached'), which the Mini App shows as a translated
+    message rather than a session that silently stops at its first round."""
+
+    def __init__(self, reason: str) -> None:
+        self.code = reason
         super().__init__(reason)
 
 
@@ -121,6 +133,16 @@ async def start_session(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Refused up front (operator decision, 2026-09-25) so a
+            # self-excluded, cooling-off or capped-out player gets a clear
+            # answer now, not a session that stops itself at the next
+            # round. Not the enforcement point: every ticket still goes
+            # through place_ticket()'s own locked check, which is what
+            # stops a session when a limit starts to apply mid-session.
+            block = await responsible_gaming.check_stake_allowed(conn, user_id, stake)
+            if block.blocked:
+                assert block.reason is not None
+                raise AutoplayBlockedByResponsibleGaming(block.reason)
             existing = await conn.fetchval(
                 "SELECT id FROM keno_autoplay_sessions WHERE user_id = $1 AND status = 'active'", user_id
             )

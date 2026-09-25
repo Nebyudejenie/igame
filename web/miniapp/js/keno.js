@@ -446,6 +446,9 @@ function renderMyTickets() {
 const AUTOPLAY_START_ERROR_KEYS = new Set([
   "autoplay_session_already_active", "invalid_autoplay_config", "invalid_stake",
   "invalid_stop_on_win_amount", "invalid_stop_on_loss_amount",
+  // keno_autoplay.start_session() refuses up front when the player's own
+  // responsible-gaming status would refuse the first ticket.
+  "self_excluded", "banned", "cooling_off", "loss_limit_reached",
 ]);
 
 let autoplayRoundsSelection = 10; // null means "no limit" -- only meaningful while the setup sheet is open

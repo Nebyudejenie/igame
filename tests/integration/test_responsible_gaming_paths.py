@@ -8,6 +8,8 @@ The paths covered here, all against real Postgres:
   the session before its next ticket, with no money taken.
 - Several Keno tickets (and several Bingo cards) in one round: the cap is
   cumulative, and a still-pending ticket's stake already counts.
+- Starting autoplay (operator decision, 2026-09-25): refused up front,
+  with the block's reason, for a player the first ticket would refuse.
 - Concurrency: simultaneous Keno tickets for one player, and a Bingo join
   racing a Keno ticket for the same player, must never jointly exceed
   the cap -- and must not deadlock.
@@ -178,14 +180,15 @@ async def test_autoplay_counts_todays_bingo_loss_toward_the_shared_cap(
 ) -> None:
     user_id = await create_funded_user(conn, Decimal("1000.00"))
     await responsible_gaming.set_loss_limit(conn, user_id, Decimal("60.00"))
+    session = await keno_autoplay.start_session(pool, user_id=user_id, picks=[1], stake=Decimal("10"), rounds_total=10)
+
+    # The Bingo loss lands while the session is already running.
     cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
     pot = await ledger.get_or_create_account(conn, None, "pot_escrow")
     await ledger.post(
         conn, "stake", [ledger.Entry(cash.id, Decimal("-55")), ledger.Entry(pot.id, Decimal("55"))],
         idempotency_key=f"test-bingo-stake-{uuid.uuid4()}", created_by="test",
     )
-    session = await keno_autoplay.start_session(pool, user_id=user_id, picks=[1], stake=Decimal("10"), rounds_total=10)
-
     await _next_round(pool, conn)
 
     assert await _session_state(conn, session.id) == ("stopped", "ticket_rejected:loss_limit_reached", 0)
@@ -206,23 +209,43 @@ async def test_autoplay_and_manual_tickets_draw_down_one_shared_cap(
     assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("20.00")
 
 
-async def test_an_autoplay_session_started_while_self_excluded_never_places_a_ticket(
+async def _block(pool: asyncpg.Pool, conn: asyncpg.Connection, user_id: int, reason: str) -> None:
+    if reason == "self_excluded":
+        await responsible_gaming.self_exclude(pool, user_id)
+    elif reason == "cooling_off":
+        await responsible_gaming.cool_off(conn, user_id, duration_hours=24)
+    elif reason == "banned":
+        await conn.execute("UPDATE users SET status = 'banned' WHERE id = $1", user_id)
+    elif reason == "loss_limit_reached":
+        await responsible_gaming.set_loss_limit(conn, user_id, Decimal("5.00"))  # the 10 stake alone exceeds it
+
+
+@pytest.mark.parametrize("reason", ["self_excluded", "cooling_off", "banned", "loss_limit_reached"])
+async def test_starting_autoplay_is_refused_up_front_for_a_blocked_player(
+    pool: asyncpg.Pool, conn: asyncpg.Connection, reason: str
+) -> None:
+    """Operator decision, 2026-09-25: refuse at start with a clear
+    reason rather than accept a session that stops itself at its first
+    round. The mid-session tests above still prove place_ticket() is the
+    enforcement point once a session is running."""
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await _block(pool, conn, user_id, reason)
+
+    with pytest.raises(keno_autoplay.AutoplayBlockedByResponsibleGaming) as exc_info:
+        await keno_autoplay.start_session(pool, user_id=user_id, picks=[1], stake=Decimal("10"), rounds_total=10)
+
+    assert exc_info.value.code == reason
+    assert await conn.fetchval("SELECT count(*) FROM keno_autoplay_sessions WHERE user_id = $1", user_id) == 0
+
+
+async def test_starting_autoplay_is_allowed_when_the_first_ticket_fits_under_the_cap(
     pool: asyncpg.Pool, conn: asyncpg.Connection
 ) -> None:
-    """Current behavior, for the operator to decide on: start_session()
-    does not check responsible-gaming status, so a self-excluded player
-    can still *create* a session. What protects them is that every ticket
-    goes through place_ticket()'s own check, so the session is stopped at
-    the first round with nothing staked. Rejecting at start would be a
-    clearer message to the player; it would not change what they can lose."""
     user_id = await create_funded_user(conn, Decimal("1000.00"))
-    await responsible_gaming.self_exclude(pool, user_id)
+    await responsible_gaming.set_loss_limit(conn, user_id, Decimal("10.00"))  # exactly one 10 stake fits
 
     session = await keno_autoplay.start_session(pool, user_id=user_id, picks=[1], stake=Decimal("10"), rounds_total=10)
-    await _next_round(pool, conn)
-
-    assert await _session_state(conn, session.id) == ("stopped", "ticket_rejected:self_excluded", 0)
-    assert await _cash(conn, user_id) == Decimal("1000.00")
+    assert session.status == "active"
 
 
 # --- several tickets / cards in one round -----------------------------------

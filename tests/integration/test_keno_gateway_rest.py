@@ -13,7 +13,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from packages.core import keno, ledger
+from packages.core import keno, ledger, responsible_gaming
 from tests.integration.conftest import build_init_data, fund_user, next_telegram_id
 from tests.integration.test_admin_auth import create_test_admin
 from tests.integration.test_gateway_rest import http_base
@@ -294,6 +294,20 @@ async def test_start_autoplay_rejects_a_config_with_no_stop_condition(gateway_se
         )
     assert response.status_code == 422
     assert response.json()["detail"] == "invalid_autoplay_config"
+
+
+async def test_start_autoplay_is_refused_over_http_for_a_self_excluded_player(gateway_server, pool):
+    headers, user_id = await _real_user_headers(gateway_server, pool)
+    await responsible_gaming.self_exclude(pool, user_id)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/autoplay",
+            headers=headers,
+            json={"picks": [1], "stake": "10", "rounds_total": 5},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "self_excluded"
+    assert await pool.fetchval("SELECT count(*) FROM keno_autoplay_sessions WHERE user_id = $1", user_id) == 0
 
 
 async def test_start_autoplay_rejects_a_second_active_session_over_http(gateway_server, pool):

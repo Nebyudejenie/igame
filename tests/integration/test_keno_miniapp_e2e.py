@@ -21,7 +21,7 @@ from decimal import Decimal
 import asyncpg
 import pytest
 
-from packages.core import keno, ledger
+from packages.core import keno, ledger, responsible_gaming
 from services.engine.keno_lock import LOCK_KEY as KENO_LOCK_KEY
 from services.engine.keno_round_engine import KenoRoundEngine
 from tests.integration.conftest import create_funded_user, next_telegram_id
@@ -332,6 +332,56 @@ async def test_keno_button_stays_cleanly_hidden_for_a_non_allowlisted_user(gatew
 
         await page.screenshot(path="/tmp/keno-button-hidden-not-allowlisted.png")
         assert console_errors == [], f"JS errors while checking Keno availability: {console_errors}"
+    finally:
+        await page.close()
+        engine.stop()
+        await asyncio.wait_for(engine_task, timeout=15.0)
+
+
+@pytest.mark.parametrize("language", ["am", "en"])
+async def test_autoplay_start_shows_a_translated_refusal_for_a_self_excluded_player(
+    gateway_server, pool, redis, browser, conn, language
+):
+    """Operator decision, 2026-09-25: a self-excluded player who tries to
+    start Autoplay gets a clear message in their own language, not a
+    generic failure and not a session that silently stops itself."""
+    await _seed_fast_config_and_tier(conn)
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id, first_name="KenoPlayer")
+
+    async with pool.acquire() as setup_conn:
+        user_id = await create_funded_user(setup_conn, Decimal("1000.00"))
+    await pool.execute("UPDATE users SET telegram_id = $1, language = $3 WHERE id = $2", telegram_id, user_id, language)
+    with open(f"web/miniapp/locales/{language}.json", encoding="utf-8") as f:
+        expected = json.load(f)["keno.autoplay_error.self_excluded"]
+
+    engine = KenoRoundEngine(pool, redis)
+    engine_task = asyncio.create_task(engine.run_forever())
+    try:
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.click("#open-keno-btn")
+        await page.wait_for_selector("#screen-keno.active", timeout=10000)
+        await page.click("#keno-onboard-skip-btn")
+        await page.wait_for_selector(".keno-cell:not(.locked)", timeout=10000)
+        await page.click('.keno-cell[aria-label="7"]')
+        await page.click('#keno-stake-chips .amount-chip:has-text("10.00")')
+        await page.wait_for_function("!document.getElementById('keno-autoplay-btn').disabled", timeout=5000)
+
+        # Self-excluded from another surface (the bot's /limits) while this
+        # tab is already open -- the server check is what refuses it.
+        await responsible_gaming.self_exclude(pool, user_id)
+
+        await page.click("#keno-autoplay-btn")
+        await page.wait_for_selector("#keno-autoplay-overlay:not(.hidden)", timeout=5000)
+        await page.click("#keno-autoplay-setup-start-btn")
+        await page.wait_for_selector("#keno-autoplay-setup-status.error", timeout=10000)
+        assert (await page.text_content("#keno-autoplay-setup-status")).strip() == expected
+        await page.screenshot(path=f"/tmp/keno-autoplay-refused-self-excluded-{language}.png")
+
+        assert await pool.fetchval("SELECT count(*) FROM keno_autoplay_sessions WHERE user_id = $1", user_id) == 0
+        assert console_errors == [], f"JS errors: {console_errors}"
     finally:
         await page.close()
         engine.stop()
