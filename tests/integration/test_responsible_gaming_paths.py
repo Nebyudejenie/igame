@@ -11,11 +11,10 @@ The paths covered here, all against real Postgres:
 - Concurrency: simultaneous Keno tickets for one player, and a Bingo join
   racing a Keno ticket for the same player, must never jointly exceed
   the cap -- and must not deadlock.
-
-Two tests pin down current behavior the operator should decide on rather
-than engineering changing unilaterally (see their docstrings): autoplay
-sessions can be *started* while blocked, and refunded stakes still count
-toward today's loss.
+- Refunds (operator decision, 2026-09-25): a refunded stake -- a dropped
+  Bingo card, a voided round in either game -- is not a loss. A returned
+  withdrawal is not a refunded stake, and neither is the refund of a
+  stake placed before midnight.
 """
 
 from __future__ import annotations
@@ -28,8 +27,13 @@ import asyncpg
 import pytest
 
 from packages.core import keno_autoplay, keno_tickets, ledger, responsible_gaming
+from services.admin import queries
+from services.engine import refunds
+from services.engine.keno_round_engine import KenoRoundEngine
 from services.engine.round_engine import RoundEngine, load_room_config
 from tests.integration.conftest import create_funded_user, create_room
+from tests.integration.test_admin_auth import create_test_admin
+from tests.integration.test_admin_withdrawals import _review_withdrawal
 from tests.integration.test_keno_autoplay import _seed_keno_round
 
 pytestmark = pytest.mark.asyncio
@@ -395,20 +399,12 @@ async def test_a_keno_ticket_racing_a_bingo_payout_to_the_same_player_does_not_d
     assert ticket.status == "pending"
 
 
-# --- refunds: current behavior, flagged for a decision -----------------------
+# --- refunds (operator decision, 2026-09-25: a refunded stake isn't a loss) --
 
 
-async def test_refunded_stakes_still_count_toward_todays_loss(
+async def test_a_dropped_bingo_card_is_not_counted_as_a_loss(
     pool: asyncpg.Pool, redis, conn: asyncpg.Connection, card_pool
 ) -> None:
-    """Current, documented behavior (responsible_gaming.py's own comment
-    on _STAKE_KINDS): refunds are not subtracted from today_net_loss().
-    A player who takes a Bingo card and drops it gets every birr back but
-    is still charged against their cap, so enough drops lock them out with
-    no real loss. The same applies to a voided Keno round's keno_refund.
-    This errs toward protecting the player, never toward letting them lose
-    more than their cap; whether it should instead net refunds out is the
-    operator's call. This test exists so the behavior can't change silently."""
     room = await load_room_config(
         pool, await create_room(conn, stake=Decimal("20.00"), max_cards_per_player=4, lobby_seconds=60)
     )
@@ -421,11 +417,167 @@ async def test_refunded_stakes_still_count_toward_todays_loss(
         for card_no in (1, 2):
             assert (await engine.join(user_id, card_no)).ok
             assert (await engine.drop_card(user_id, card_no)).ok
-        assert await _cash(conn, user_id) == Decimal("1000.00")  # every stake came back
-        assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("40.00")
+        assert await _cash(conn, user_id) == Decimal("1000.00")
+        assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("0.00")
 
-        third = await engine.join(user_id, 3)
-        assert (third.ok, third.reason) == (False, "loss_limit_reached")
+        # The cap still binds on what's really at stake: 20, 40, then 60 > 50.
+        assert (await engine.join(user_id, 3)).ok
+        assert (await engine.join(user_id, 4)).ok
+        fifth = await engine.join(user_id, 5)
+        assert (fifth.ok, fifth.reason) == (False, "loss_limit_reached")
+        assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("40.00")
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)
+
+
+async def test_a_voided_bingo_round_is_not_counted_as_a_loss(
+    pool: asyncpg.Pool, redis, conn: asyncpg.Connection, card_pool
+) -> None:
+    """The real underfilled-lobby path: one player, min_players=2, so the
+    engine refunds the round itself when the lobby closes."""
+    room = await load_room_config(pool, await create_room(conn, stake=Decimal("20.00"), min_players=2, lobby_seconds=2))
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_id, Decimal("50.00"))
+
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        assert (await engine.join(user_id, 1)).ok
+        for _ in range(200):
+            if await conn.fetchval(
+                "SELECT count(*) FROM ledger_transactions WHERE idempotency_key LIKE $1", f"refund-%-{user_id}-1"
+            ):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the underfilled round was never refunded")
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+    assert await _cash(conn, user_id) == Decimal("1000.00")
+    assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("0.00")
+
+
+async def test_a_voided_keno_round_is_not_counted_as_a_loss(
+    pool: asyncpg.Pool, redis, conn: asyncpg.Connection
+) -> None:
+    round_id = await _seed_keno_round(conn)
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_id, Decimal("25.00"))
+    await _ticket(pool, user_id)
+    await _ticket(pool, user_id)
+    with pytest.raises(keno_tickets.ResponsibleGamingBlock):
+        await _ticket(pool, user_id)  # 30 > 25
+
+    await KenoRoundEngine(pool, redis)._fail_and_refund_round(round_id, reason="test_void")
+
+    assert await _cash(conn, user_id) == Decimal("1000.00")
+    assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("0.00")
+    await _seed_keno_round(conn)
+    assert (await _ticket(pool, user_id)).status == "pending"  # playable again
+
+
+async def test_a_rejected_withdrawal_is_not_subtracted_from_todays_loss(
+    pool: asyncpg.Pool, redis, conn: asyncpg.Connection
+) -> None:
+    """A rejected withdrawal is posted with the same 'refund' kind as a
+    returned stake (user_locked back to user_cash). It was never staked,
+    so it must not buy the player any loss headroom."""
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_id, Decimal("50.00"))
+    await _seed_keno_round(conn)
+    await _ticket(pool, user_id, "20")
+    payment_id, _ = await _review_withdrawal(pool, redis, conn, user_id, Decimal("500.00"))
+    assert await queries.reject_withdrawal_admin(
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="test: account mismatch", ip_address=None
+    )
+    assert await conn.fetchval(
+        "SELECT count(*) FROM ledger_transactions WHERE kind = 'refund' AND payment_id = $1", payment_id
+    ) == 1
+
+    assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("20.00")
+    await _ticket(pool, user_id, "20")  # 40
+    with pytest.raises(keno_tickets.ResponsibleGamingBlock):
+        await _ticket(pool, user_id, "20")  # 60 > 50
+
+
+async def _start_of_yesterday_plus_an_hour(conn: asyncpg.Connection):
+    return await conn.fetchval(
+        "SELECT (date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa') "
+        "- interval '23 hours'"
+    )
+
+
+async def test_a_refund_today_of_yesterdays_keno_stake_does_not_offset_todays_loss(
+    pool: asyncpg.Pool, redis, conn: asyncpg.Connection
+) -> None:
+    """A stake placed before midnight was already counted against
+    yesterday's cap. Its refund landing after midnight must not give the
+    player extra headroom today, or they could really lose more than their
+    cap today. The stake is backdated through ledger.post(created_at=...)
+    (ledger_entries is append-only); the refund goes through the real
+    engine void path."""
+    round_id = await _seed_keno_round(conn)
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    reserve = await ledger.get_or_create_account(conn, None, "keno_reserve")
+    key = f"test-yesterday-{uuid.uuid4()}"
+    stake_txn = await ledger.post(
+        conn, "keno_stake", [ledger.Entry(cash.id, Decimal("-10")), ledger.Entry(reserve.id, Decimal("10"))],
+        idempotency_key=key, created_by="test", created_at=await _start_of_yesterday_plus_an_hour(conn),
+    )
+    paytable_id = await conn.fetchval("SELECT id FROM keno_paytables ORDER BY id DESC LIMIT 1")
+    await conn.execute(
+        "INSERT INTO keno_tickets (round_id, user_id, paytable_id, pick_count, stake, status, idempotency_key, stake_txn_id) "
+        "VALUES ($1, $2, $3, 1, 10, 'pending', $4, $5)",
+        round_id, user_id, paytable_id, key, stake_txn.id,
+    )
+    pot = await ledger.get_or_create_account(conn, None, "pot_escrow")
+    await ledger.post(
+        conn, "stake", [ledger.Entry(cash.id, Decimal("-30")), ledger.Entry(pot.id, Decimal("30"))],
+        idempotency_key=f"test-today-{uuid.uuid4()}", created_by="test",
+    )
+    assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("30.00")
+
+    await KenoRoundEngine(pool, redis)._fail_and_refund_round(round_id, reason="test_void")
+
+    assert await conn.fetchval("SELECT status FROM keno_tickets WHERE stake_txn_id = $1", stake_txn.id) == "refunded"
+    assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("30.00")
+
+
+async def test_a_refund_today_of_yesterdays_bingo_stake_does_not_offset_todays_loss(
+    pool: asyncpg.Pool, conn: asyncpg.Connection
+) -> None:
+    """Same rule for Bingo, whose refund is matched to its stake through
+    the stake-/refund-{round}-{user}-{card} keys. The round and entry are
+    seeded directly so the stake can be backdated; the refund goes through
+    the real refunds.refund_round_in_transaction()."""
+    room_id = await create_room(conn, stake=Decimal("20.00"))
+    round_id = await conn.fetchval(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash) "
+        "VALUES ($1, 1, 'lobby', 20.00, 2000, 'test-hash') RETURNING id",
+        room_id,
+    )
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    pot = await ledger.get_or_create_account(conn, None, "pot_escrow")
+    await conn.execute("INSERT INTO round_entries (round_id, card_no, user_id) VALUES ($1, 1, $2)", round_id, user_id)
+    await ledger.post(
+        conn, "stake", [ledger.Entry(cash.id, Decimal("-20")), ledger.Entry(pot.id, Decimal("20"))],
+        idempotency_key=f"stake-{round_id}-{user_id}-1", round_id=round_id,
+        created_at=await _start_of_yesterday_plus_an_hour(conn),
+    )
+    await ledger.post(
+        conn, "stake", [ledger.Entry(cash.id, Decimal("-30")), ledger.Entry(pot.id, Decimal("30"))],
+        idempotency_key=f"test-today-{uuid.uuid4()}", created_by="test",
+    )
+
+    async with pool.acquire() as refund_conn:
+        async with refund_conn.transaction():
+            assert await refunds.refund_round_in_transaction(refund_conn, round_id, reason="test_void") == 1
+
+    assert await _cash(conn, user_id) == Decimal("970.00")  # the 20 came back; the 30 didn't
+    assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("30.00")

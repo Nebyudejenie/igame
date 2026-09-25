@@ -12543,3 +12543,14 @@ number sets, colorblind-safe state encoding audit, contextual live
 paytable, jackpot ticker, and fairness-verification UI polish — none of
 these need a backend decision, unlike autoplay/multi-race and loss
 limits did.
+
+## 2026-09-25 — Refunded stakes no longer count toward the daily loss cap
+
+**Decision (operator)**: a refunded stake isn't a loss. `responsible_gaming.today_net_loss()` now subtracts refunds, where it previously counted only stakes minus payouts. Found by the responsible-gaming audit: a player who dropped Bingo cards, or whose round we voided, could be locked out of both games with no real loss.
+
+**Two rules keep it from ever letting a player lose more than their cap:**
+
+1. **Only stake refunds count.** The `refund` ledger kind is also used when a withdrawal is rejected (`payout-reject-`), fails (`manual-payout-fail-`) or is reversed by the payout worker (`payout-reverse-`), all user_locked → user_cash with a `payment_id` and no `round_id`. Subtracting those would give a player with a rejected 5,000 ETB withdrawal 5,000 ETB of extra loss headroom.
+2. **A refund offsets today only if its stake was also placed today** (Ethiopian day). A stake at 23:59 was counted against yesterday. If its refund at 00:01 offset today, the player could really lose more than their cap today.
+
+**How a refund finds its stake**: through the static idempotency keys both games already use for exactly-once posting. Bingo: `drop-`/`refund-{round}-{user}-{card}` returns `stake-{round}-{user}-{card}`. Keno: `keno:refund:{round}:{ticket}` returns that ticket's `stake_txn_id`. Changing either key format would silently turn refunds back into losses. `tests/integration/test_responsible_gaming_paths.py` covers every refund path, so that can't happen unnoticed. The tests were checked against both wrong versions: the old code fails the three refund tests, and a naive "subtract every refund" version fails the withdrawal and both cross-midnight tests.

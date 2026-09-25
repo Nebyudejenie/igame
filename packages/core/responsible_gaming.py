@@ -302,22 +302,44 @@ async def check_stake_allowed(conn: AsyncpgConnection, user_id: int, stake: Deci
 # daily loss cap across the whole platform, not a per-game one (operator
 # decision, 2026-09-21: a player down 500 on Bingo and 500 on Keno has
 # genuinely lost 1,000 today, not two separate 500s that don't count
-# against each other). A future third game adds its own two kinds here,
-# not a second copy of today_net_loss()'s own query. Deliberately
-# excludes both games' own refund kinds ("refund", "keno_refund") --
-# matches this query's own pre-existing behavior for Bingo (a refunded
-# stake was never subtracted back out before this change either), not a
-# new inconsistency introduced here. keno_jackpot_payout has no Bingo
-# equivalent to match precedent against; included on its own merits --
-# a real win credited to user_cash, same as an ordinary payout.
+# against each other). A future third game adds its own kinds here, not
+# a second copy of today_net_loss()'s own query. keno_jackpot_payout has
+# no Bingo equivalent; included on its own merits -- a real win credited
+# to user_cash, same as an ordinary payout.
 _STAKE_KINDS = ("stake", "keno_stake")
 _PAYOUT_KINDS = ("payout", "keno_payout", "keno_jackpot_payout")
 
+# Refunded stakes are not losses (operator decision, 2026-09-25): a
+# player who drops a Bingo card, or whose Keno round we voided, got the
+# money back and must not be locked out by it. Two rules keep this from
+# ever letting someone lose more than their cap:
+#
+# 1. Only *stake* refunds count. The "refund" kind is also posted when a
+#    withdrawal is rejected, fails or is reversed (user_locked back to
+#    user_cash, payment_id set, no round_id). That money was never staked;
+#    subtracting it would hand a player with a rejected 5,000 withdrawal
+#    5,000 of extra loss headroom.
+# 2. A refund offsets today's loss only if the stake it returns was also
+#    placed today. A stake placed at 23:59 and refunded at 00:01 was
+#    counted against yesterday; letting its refund offset today would let
+#    the player lose more than their cap today in real terms.
+#
+# Each refund is matched to its own stake through the static idempotency
+# keys both games already rely on for exactly-once posting: Bingo's
+# drop-/refund-{round}-{user}-{card} returns stake-{round}-{user}-{card}
+# (round_engine.join/drop_card, refunds.refund_round_in_transaction), and
+# Keno's keno:refund:{round}:{ticket} returns that ticket's stake_txn_id
+# (keno_round_engine._refund_one_ticket). Changing either key format
+# silently turns refunds back into losses -- test_responsible_gaming_
+# paths.py covers every refund path so that can't happen unnoticed.
+_REFUND_KINDS = ("refund", "keno_refund")
+
 
 async def today_net_loss(conn: AsyncpgConnection, user_id: int) -> Decimal:
-    """Stakes debited from user_cash today minus payouts credited to it
-    today, across every game -- a positive number means the player is net
-    down for the day.
+    """Stakes debited from user_cash today, minus payouts credited to it
+    today, minus refunds of stakes placed today (see _REFUND_KINDS), across
+    every game -- a positive number means the player is net down for the
+    day.
 
     "Today" means the Ethiopian calendar day, not the Postgres session's
     ambient (UTC-by-default) one -- a bare `date_trunc('day', now())`
@@ -327,23 +349,57 @@ async def today_net_loss(conn: AsyncpgConnection, user_id: int) -> Decimal:
     """
     row = await conn.fetchrow(
         """
+        WITH day AS (
+            SELECT date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa' AS start
+        ),
+        mine AS (
+            SELECT e.account_id, e.amount, t.kind, t.round_id, t.idempotency_key
+            FROM ledger_entries e
+            JOIN accounts a ON a.id = e.account_id
+            JOIN ledger_transactions t ON t.id = e.transaction_id
+            CROSS JOIN day
+            WHERE a.user_id = $1 AND a.kind = 'user_cash' AND t.kind = ANY($2::text[] || $3::text[] || $4::text[])
+              AND e.created_at >= day.start
+        ),
+        classified AS (
+            SELECT m.*,
+                CASE
+                    WHEN m.kind = 'refund' THEN m.round_id IS NOT NULL AND EXISTS (
+                        SELECT 1
+                        FROM ledger_transactions st
+                        JOIN ledger_entries se ON se.transaction_id = st.id AND se.account_id = m.account_id
+                        CROSS JOIN day
+                        WHERE st.idempotency_key = regexp_replace(m.idempotency_key, '^(drop|refund)-', 'stake-')
+                          AND st.kind = 'stake' AND se.created_at >= day.start
+                    )
+                    WHEN m.kind = 'keno_refund' THEN EXISTS (
+                        SELECT 1
+                        FROM keno_tickets kt
+                        JOIN ledger_entries se ON se.transaction_id = kt.stake_txn_id AND se.account_id = m.account_id
+                        CROSS JOIN day
+                        WHERE kt.id = substring(m.idempotency_key FROM '^keno:refund:[0-9]+:([0-9]+)$')::bigint
+                          AND se.created_at >= day.start
+                    )
+                    ELSE false
+                END AS returns_a_stake_from_today
+            FROM mine m
+        )
         SELECT
-            COALESCE(SUM(-e.amount) FILTER (WHERE t.kind = ANY($2)), 0) AS staked,
-            COALESCE(SUM(e.amount) FILTER (WHERE t.kind = ANY($3)), 0) AS won
-        FROM ledger_entries e
-        JOIN accounts a ON a.id = e.account_id
-        JOIN ledger_transactions t ON t.id = e.transaction_id
-        WHERE a.user_id = $1 AND a.kind = 'user_cash' AND t.kind = ANY($2 || $3)
-          AND e.created_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa'
+            COALESCE(SUM(-amount) FILTER (WHERE kind = ANY($2::text[])), 0) AS staked,
+            COALESCE(SUM(amount) FILTER (WHERE kind = ANY($3::text[])), 0) AS won,
+            COALESCE(SUM(amount) FILTER (WHERE kind = ANY($4::text[]) AND returns_a_stake_from_today), 0) AS refunded
+        FROM classified
         """,
         user_id,
         list(_STAKE_KINDS),
         list(_PAYOUT_KINDS),
+        list(_REFUND_KINDS),
     )
     assert row is not None
     staked: Decimal = row["staked"]
     won: Decimal = row["won"]
-    return staked - won
+    refunded: Decimal = row["refunded"]
+    return staked - won - refunded
 
 
 async def marketing_eligible_user_ids(pool: asyncpg.Pool) -> list[int]:
