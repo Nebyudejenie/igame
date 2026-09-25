@@ -46,7 +46,7 @@ async def _seed_fast_config_and_tier(
              min_picks, max_picks, draw_count, number_pool_size,
              max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled,
              beta_restricted, effective_from)
-        VALUES ($1, 10, $2, $3, $4, 1, 5, 20, 80, 5, 5000, true, false, now() - interval '1 second')
+        VALUES ($1, 10, $2, $3, $4, 1, 5, 20, 80, 5, 5000, true, false, GREATEST(now() - interval '1 second', (SELECT max(effective_from) FROM keno_configs WHERE effective_from <= now()) + interval '1 microsecond'))
         """,
         version,
         betting_seconds,
@@ -59,7 +59,7 @@ async def _seed_fast_config_and_tier(
             (tier_number, version, min_reserve, max_pick_count, max_top_multiplier,
              stake_options, max_win_per_ticket, max_round_exposure_pct, paytable_profile, effective_from)
         VALUES (1, $1, 0, 5, 16, ARRAY[10.00, 20.00, 50.00]::numeric(18,2)[], 800, 0.50, 'low_variance',
-                now() - interval '1 second')
+                GREATEST(now() - interval '1 second', (SELECT max(effective_from) FROM keno_risk_tiers WHERE effective_from <= now()) + interval '1 microsecond'))
         RETURNING id
         """,
         version,
@@ -70,7 +70,7 @@ async def _seed_fast_config_and_tier(
         INSERT INTO keno_paytables
             (pick_count, version, profile, multipliers, computed_rtp_bps, hit_frequency_bps,
              max_multiplier, volatility, effective_from)
-        VALUES (1, $1, 'low_variance', $2::jsonb, $3, $4, $5, $6, now() - interval '1 second')
+        VALUES (1, $1, 'low_variance', $2::jsonb, $3, $4, $5, $6, GREATEST(now() - interval '1 second', (SELECT max(effective_from) FROM keno_paytables WHERE effective_from <= now()) + interval '1 microsecond'))
         """,
         version,
         json.dumps({str(k): str(v) for k, v in _FAST_MULTIPLIERS.items()}),
