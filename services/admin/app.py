@@ -1451,6 +1451,15 @@ async def keno_dashboard(
     return await keno_queries.dashboard_summary_admin(app.state.pool)
 
 
+@app.get("/keno/configs/active")
+async def get_active_keno_config(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+) -> dict[str, Any]:
+    """The config actually in effect (latest effective_from <= now), which
+    is not necessarily the newest-inserted row /keno/configs lists first."""
+    return await keno_queries.get_active_config_admin(app.state.pool)
+
+
 @app.get("/keno/configs")
 async def list_keno_configs(
     admin: Annotated[AdminSession, Depends(require("keno:view"))],

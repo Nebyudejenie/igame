@@ -523,3 +523,23 @@ async def test_reports_endpoints_return_real_shapes_over_http(admin_server, pool
     assert Decimal(today["ggr"]) == Decimal(today["handle"]) - Decimal(today["paid"])
     assert kpis.status_code == 200
     assert {"dau", "hold_pct", "arpdau", "d1_retention", "player_ltv"} <= set(kpis.json())
+
+
+async def test_active_config_endpoint_returns_the_effective_config_not_the_newest_row(admin_server, pool, conn):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    active = await keno_queries.create_config_admin(
+        pool, admin_id=admin_id, round_cycle_seconds=45, betting_seconds=25, draw_seconds=12, result_seconds=8,
+        min_picks=1, max_picks=5, max_tickets_per_user_per_round=3, per_user_round_capacity_share_bps=2000,
+        jackpot_diversion_bps=150, keno_enabled=False, reason="active config for this test",
+    )
+    # A newer row that isn't in effect yet must not be reported as active.
+    await conn.execute(
+        "INSERT INTO keno_configs (version, round_cycle_seconds, betting_seconds, draw_seconds, result_seconds, "
+        "max_tickets_per_user_per_round, per_user_round_capacity_share_bps, keno_enabled, effective_from) "
+        "VALUES ((SELECT MAX(version) + 1 FROM keno_configs), 45, 25, 12, 8, 3, 2000, false, now() + interval '1 day')"
+    )
+    headers = await _auth_headers(admin_server, pool, role="support")
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{admin_server}/keno/configs/active", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["id"] == active["id"]

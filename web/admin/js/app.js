@@ -14,6 +14,7 @@ import * as ingestionDevicesScreen from "./screens/ingestion_devices.js";
 import * as providerAvailabilityScreen from "./screens/provider_availability.js";
 import * as roundsScreen from "./screens/rounds.js";
 import * as roomsScreen from "./screens/rooms.js";
+import * as kenoScreen from "./screens/keno.js";
 import * as notificationsScreen from "./screens/notifications.js";
 import * as botContentScreen from "./screens/bot_content.js";
 import * as reportsScreen from "./screens/reports.js";
@@ -42,6 +43,7 @@ const SCREENS = {
   provider_availability: providerAvailabilityScreen,
   rounds: roundsScreen,
   rooms: roomsScreen,
+  keno: kenoScreen,
   bonuses: bonusesScreen,
   notifications: notificationsScreen,
   bot_content: botContentScreen,

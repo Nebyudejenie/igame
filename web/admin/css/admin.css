@@ -523,3 +523,23 @@ pre.code-block {
 .search-result-row .field-value {
   font-size: 0.9rem;
 }
+
+/* Keno screen sub-sections (web/admin/js/screens/keno.js). */
+.subnav { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }
+.subnav-btn {
+  background: var(--panel); border: 1px solid var(--border); color: var(--text);
+  padding: 0.35rem 0.8rem; border-radius: var(--radius); cursor: pointer; font: inherit;
+}
+.subnav-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.guardrail-ok { color: var(--success); font-weight: 600; }
+.guardrail-bad { color: var(--danger); font-weight: 600; }
+.number-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.number-chip {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.1rem 0.4rem; font-variant-numeric: tabular-nums;
+}
+/* Stacked label-over-field layout for Keno's denser forms: inline labels in
+   a 140px grid cell otherwise collide with their inputs. */
+.keno-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; min-width: 0; }
+.keno-form label input, .keno-form label select { width: 100%; min-width: 0; }
+.keno-form .detail-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }

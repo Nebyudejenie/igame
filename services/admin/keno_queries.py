@@ -735,6 +735,7 @@ async def daily_report_admin(pool: asyncpg.Pool, *, days: int = 14) -> list[dict
             WHERE t.status IN ('won', 'lost') AND NOT u.is_simulated
               AND t.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
                                   - make_interval(days => $1 - 1)
+              AND t.created_at < now()
             GROUP BY 1 ORDER BY 1 DESC
             """,
             days,

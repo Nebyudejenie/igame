@@ -1,23 +1,31 @@
 # Keno — Admin Guide / የኬኖ አስተዳደር መመሪያ
 
-**Important, upfront**: there is currently **no dedicated admin web
-screen for Keno** — the admin panel (`web/admin/`) has no Keno page.
-Every action described below is a direct HTTP call to the `admin`
-service (see `03-api.md` for the full reference). This guide is written
-so a non-developer operator can still perform every task, with a
-runnable `curl` example for each one — but be aware you're calling the
-API directly, not clicking through a form. Building an actual Keno
-screen in the admin panel is a real, separate piece of work, not yet
-done — flagged here rather than described as if it already existed.
+**The admin console now has a Keno screen** (as of 2026-09-25): open the
+admin panel and choose **Keno** in the left menu. It has six sections:
 
-**አስፈላጊ ማሳሰቢያ**: ለኬኖ የተለየ የአስተዳደር ገጽ (admin panel screen) እስካሁን
-የለም። ከታች የተገለጹት ተግባራት ሁሉ በቀጥታ ወደ `admin` አገልግሎት የሚላኩ HTTP ጥያቄዎች
-ናቸው (ሙሉ ዝርዝር በ`03-api.md` ውስጥ ይገኛል)። ይህ መመሪያ የቴክኒክ ባለሙያ ላልሆነ
-ኦፕሬተርም እንኳ እያንዳንዱን ተግባር በቀላሉ መፈጸም እንዲችል ተብሎ የተዘጋጀ ሲሆን፣ ለያንዳንዱ
-ተግባር ተግባራዊ የሆነ `curl` ምሳሌ ይዟል — ነገር ግን በቀጥታ API እየጠሩ እንጂ ቅጽ
-(form) እየሞሉ አለመሆኑን ልብ ይበሉ። ለኬኖ የራሱ የሆነ የአስተዳደር ገጽ መገንባት እውነተኛ፣
-ገና ያልተጠናቀቀ ስራ ነው — እዚህ ላይ የተገለጸው እንደ ነባር ነገር ሳይሆን እንደ ክፍት ስራ
-(gap) ነው።
+| Section | What it does | Who can use it |
+|---|---|---|
+| Overview | Kill switch, prize reserve vs. player liability (kept separate), jackpot pool, current tier, live round, active config, reserve deposit/withdraw | Everyone can view; kill switch and reserve transfers are superadmin-only, with a confirmation that shows the exact amount |
+| Rounds | Every round, filterable by status; click one for its tickets, draw, and state history | Everyone |
+| Paytables | Active paytables, plus an editor with live RTP/hit-frequency. Saving is blocked outside the 75–97% RTP guardrail | Editor: ops and superadmin. Saving: superadmin |
+| Tiers & access | Tier ladder with the current tier marked, beta allowlist add/remove | Everyone can view; changes are superadmin-only |
+| Risk simulator | Monte Carlo reserve projection against a real active paytable | Ops and superadmin |
+| Reports | Last-24h GGR, hold, players, retention, LTV; daily table | Everyone |
+
+Every change still needs a real reason of at least 10 characters, and
+every change is written to the audit log. The `curl` examples below
+still work and cover the same actions, which is useful for scripts or if
+the screen is unavailable.
+
+**ማስታወሻ (2026-09-25)**: የአስተዳደር ፓነሉ አሁን የኬኖ ገጽ አለው — በግራ በኩል
+ካለው ምናሌ **Keno** የሚለውን ይምረጡ። ስድስት ክፍሎች አሉት፦ Overview (የማቆሚያ
+ቁልፍ፣ የሽልማት መጠባበቂያ እና የተጫዋቾች ዕዳ ለየብቻ፣ የጃክፖት ገንዘብ፣ የአሁኑ tier፣
+የአሁኑ ዙር)፣ Rounds (ሁሉም ዙሮች እና ዝርዝራቸው)፣ Paytables (የክፍያ ሰንጠረዥ
+አርታኢ፣ RTP ከ75–97% ውጪ ከሆነ ማስቀመጥ አይቻልም)፣ Tiers & access (tier እና
+የቤታ ፍቃድ ዝርዝር)፣ Risk simulator (የመጠባበቂያ ትንበያ)፣ እና Reports (ገቢ፣ hold፣
+ተጫዋቾች፣ retention)። ማንኛውም ለውጥ ቢያንስ 10 ፊደል ያለው ትክክለኛ ምክንያት
+ይፈልጋል፣ እና በ audit log ውስጥ ይመዘገባል። ከታች ያሉት `curl` ምሳሌዎች አሁንም
+ይሠራሉ።
 
 ---
 
