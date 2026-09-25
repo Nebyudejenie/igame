@@ -214,14 +214,6 @@ async def _place_ticket(
                     status=existing["status"],
                 )
 
-            user_row = await conn.fetchrow(
-                "SELECT id, status, is_simulated FROM users WHERE id = $1 FOR UPDATE", user_id
-            )
-            if user_row is None:
-                raise UnknownUser(str(user_id))
-            if user_row["is_simulated"]:
-                raise SimulatedPlayerCannotPlaceKenoTicket(str(user_id))
-
             # Same pg_advisory_xact_lock(user_id) round_engine.py's own
             # join() takes, and for the identical reason (its own
             # comment): without a lock held for this whole transaction,
@@ -232,7 +224,31 @@ async def _place_ticket(
             # user_id, not per-game, so it correctly serializes against
             # Bingo's own call too -- pg_advisory_xact_lock is global to
             # the whole Postgres instance, not scoped to a table.
+            #
+            # Taken first, before any row lock, in the same order join()
+            # takes it. join() holds this lock while inserting its
+            # round_entries row, whose user_id foreign key needs FOR KEY
+            # SHARE on the users row; had this transaction already locked
+            # that row, each would wait on the other (a real deadlock,
+            # test_responsible_gaming_paths.py).
             await conn.execute("SELECT pg_advisory_xact_lock($1)", user_id)
+
+            # FOR NO KEY UPDATE, not FOR UPDATE: it still serializes
+            # against another ticket for this user and against a status
+            # change (a ban or self-exclusion is a non-key UPDATE), but
+            # doesn't block the FOR KEY SHARE every foreign-key insert
+            # referencing this user takes. FOR UPDATE did, which deadlocked
+            # a Keno ticket against Bingo settlement paying the same player
+            # (payout post locks the balance row, then round_winners'
+            # foreign key wants this row).
+            user_row = await conn.fetchrow(
+                "SELECT id, status, is_simulated FROM users WHERE id = $1 FOR NO KEY UPDATE", user_id
+            )
+            if user_row is None:
+                raise UnknownUser(str(user_id))
+            if user_row["is_simulated"]:
+                raise SimulatedPlayerCannotPlaceKenoTicket(str(user_id))
+
             block = await responsible_gaming.check_stake_allowed(conn, user_id, stake)
             if block.blocked:
                 assert block.reason is not None

@@ -8,8 +8,9 @@ The paths covered here, all against real Postgres:
   the session before its next ticket, with no money taken.
 - Several Keno tickets (and several Bingo cards) in one round: the cap is
   cumulative, and a still-pending ticket's stake already counts.
-- Concurrency: simultaneous Keno tickets for one player must never
-  jointly exceed the cap.
+- Concurrency: simultaneous Keno tickets for one player, and a Bingo join
+  racing a Keno ticket for the same player, must never jointly exceed
+  the cap -- and must not deadlock.
 
 Two tests pin down current behavior the operator should decide on rather
 than engineering changing unilaterally (see their docstrings): autoplay
@@ -277,6 +278,121 @@ async def test_concurrent_keno_tickets_for_one_player_cannot_jointly_exceed_the_
     assert (len(placed), len(refused)) == (2, 3), results
     assert {r.code for r in refused} == {"loss_limit_reached"}
     assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("20.00")
+
+
+async def _wait_for_advisory_lock_waiter(conn: asyncpg.Connection, user_id: int) -> None:
+    # pg_advisory_xact_lock(bigint) shows up in pg_locks with the key's low
+    # 32 bits as objid (objsubid = 1 marks the single-bigint form).
+    for _ in range(200):
+        waiting = await conn.fetchval(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
+            "AND objsubid = 1 AND classid = 0 AND objid = $1",
+            user_id,
+        )
+        if waiting:
+            return
+        await asyncio.sleep(0.025)
+    raise AssertionError("the Keno ticket never reached the per-user advisory lock")
+
+
+async def test_a_bingo_join_racing_a_keno_ticket_neither_deadlocks_nor_breaches_the_cap(
+    pool: asyncpg.Pool, redis, conn: asyncpg.Connection, card_pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both games serialize a player's stakes on pg_advisory_xact_lock(
+    user_id). Bingo's join() takes that lock and then, inserting its
+    round_entries row, a FOR KEY SHARE lock on the player's users row
+    (round_entries.user_id's foreign key). If Keno took its FOR UPDATE on
+    the same users row *before* the advisory lock, the two would wait on
+    each other and Postgres would abort one of them with a deadlock error
+    instead of an answer.
+
+    The race is made deterministic by holding Bingo's join, at a real
+    await point, right after its loss check: the Keno ticket is started
+    then, and Bingo continues only once Keno is visibly waiting on the
+    advisory lock."""
+    await _seed_keno_round(conn)
+    room = await load_room_config(pool, await create_room(conn, stake=Decimal("50.00"), lobby_seconds=60))
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_id, Decimal("55.00"))  # Bingo 50 fits; Bingo 50 + Keno 10 doesn't
+
+    real_check = responsible_gaming.check_stake_allowed
+    bingo_checked = asyncio.Event()
+    release_bingo = asyncio.Event()
+    calls = 0
+
+    async def check_then_hold_the_first_caller(check_conn, check_user_id, stake):
+        nonlocal calls
+        calls += 1
+        result = await real_check(check_conn, check_user_id, stake)
+        if calls == 1:
+            bingo_checked.set()
+            await release_bingo.wait()
+        return result
+
+    monkeypatch.setattr(responsible_gaming, "check_stake_allowed", check_then_hold_the_first_caller)
+
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        join_task = asyncio.create_task(engine.join(user_id, 1))
+        await asyncio.wait_for(bingo_checked.wait(), timeout=10)
+        ticket_task = asyncio.create_task(_ticket(pool, user_id))
+        await _wait_for_advisory_lock_waiter(conn, user_id)
+        release_bingo.set()
+        join_result, ticket_result = await asyncio.wait_for(
+            asyncio.gather(join_task, ticket_task, return_exceptions=True), timeout=20
+        )
+
+        assert not isinstance(join_result, BaseException), join_result
+        assert join_result.ok, join_result
+        assert isinstance(ticket_result, keno_tickets.ResponsibleGamingBlock), ticket_result
+        assert ticket_result.code == "loss_limit_reached"
+        assert await responsible_gaming.today_net_loss(conn, user_id) == Decimal("50.00")
+    finally:
+        release_bingo.set()
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def _wait_until_blocked_by(conn: asyncpg.Connection, blocker_pid: int) -> None:
+    for _ in range(200):
+        if await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", blocker_pid):
+            return
+        await asyncio.sleep(0.025)
+    raise AssertionError("the Keno ticket never blocked on the held balance row")
+
+
+async def test_a_keno_ticket_racing_a_bingo_payout_to_the_same_player_does_not_deadlock(
+    pool: asyncpg.Pool, conn: asyncpg.Connection
+) -> None:
+    """Bingo settlement (round_engine.py, the 'payout' post) locks each
+    winner's user_cash balance row inside ledger.post() and only then
+    inserts round_winners, whose user_id foreign key takes FOR KEY SHARE
+    on the winner's users row. A Keno ticket holding FOR UPDATE on that
+    users row while waiting for the same balance row would deadlock with
+    it. Reproduced with settlement's exact two locks, in its order, on a
+    held transaction -- not a full Bingo round played to a win."""
+    await _seed_keno_round(conn)
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+
+    async with pool.acquire() as settle_conn:
+        settle_pid = await settle_conn.fetchval("SELECT pg_backend_pid()")
+        tx = settle_conn.transaction()
+        await tx.start()
+        try:
+            held = await settle_conn.fetchval(
+                "SELECT 1 FROM account_balances WHERE account_id = $1 FOR UPDATE", cash.id
+            )
+            assert held == 1  # the balance row exists, so this really is a held lock
+            ticket_task = asyncio.create_task(_ticket(pool, user_id))
+            await _wait_until_blocked_by(conn, settle_pid)
+            await settle_conn.execute("SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE", user_id)
+        finally:
+            await tx.rollback()
+        ticket = await asyncio.wait_for(ticket_task, timeout=20)
+
+    assert ticket.status == "pending"
 
 
 # --- refunds: current behavior, flagged for a decision -----------------------
