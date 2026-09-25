@@ -199,6 +199,8 @@
   "keno.autoplay_ended.rounds_exhausted": "Autoplay finished — all rounds played.",
   "keno.autoplay_ended.stop_on_win": "Autoplay stopped — your win target was reached!",
   "keno.autoplay_ended.stop_on_loss": "Autoplay stopped — your loss limit was reached.",
+  "keno.autoplay_ended.placement_error": "Autoplay stopped because of a problem on our side. Your balance is safe — you can start it again.",
+  "keno.autoplay_ended.settlement_error": "Autoplay stopped because of a problem on our side. Your balance is safe — you can start it again.",
   "keno.view_paytable": "Paytable",
   "keno.view_history": "History",
   "keno.onboard_skip": "Skip",

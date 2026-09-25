@@ -199,6 +199,8 @@
   "keno.autoplay_ended.rounds_exhausted": "አውቶፕሌይ ተጠናቋል — ሁሉም ዙሮች ተጫውተዋል።",
   "keno.autoplay_ended.stop_on_win": "አውቶፕሌይ ቆሟል — የማሸነፊያ ግብዎ ላይ ደርሰዋል!",
   "keno.autoplay_ended.stop_on_loss": "አውቶፕሌይ ቆሟል — የማጣት ገደብዎ ላይ ደርሰዋል።",
+  "keno.autoplay_ended.placement_error": "በእኛ በኩል በተፈጠረ ችግር ምክንያት አውቶፕሌይ ቆሟል። ቀሪ ሂሳብዎ ደህና ነው፤ እንደገና ማስጀመር ይችላሉ።",
+  "keno.autoplay_ended.settlement_error": "በእኛ በኩል በተፈጠረ ችግር ምክንያት አውቶፕሌይ ቆሟል። ቀሪ ሂሳብዎ ደህና ነው፤ እንደገና ማስጀመር ይችላሉ።",
   "keno.view_paytable": "የክፍያ ሰንጠረዥ",
   "keno.view_history": "ታሪክ",
   "keno.onboard_skip": "ዝለል",

@@ -33,7 +33,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import keno, keno_tickets, responsible_gaming
+from packages.core import keno, keno_tickets, metrics, responsible_gaming
 
 logger = structlog.get_logger()
 
@@ -196,38 +196,66 @@ async def place_for_active_sessions(pool: asyncpg.Pool, redis: Redis, *, round_i
     """Called once per round from keno_round_engine.py's own
     _open_betting(), right after a round becomes real -- walks every
     currently active session and places exactly one ticket per session
-    into THIS round."""
+    into THIS round.
+
+    Never raises for one session's sake (operator decision, 2026-09-25):
+    one player's failure must never skip the sessions queued behind them
+    or take down the engine's round loop. An expected rejection stops that
+    session with its reason, as before. Anything unexpected (a deadlock, a
+    dropped connection, a bug) stops that session too, with reason
+    'placement_error': this is real money bet without a per-bet tap, and
+    after an unexplained failure we don't know enough to keep betting for
+    the player. They can start it again."""
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM keno_autoplay_sessions WHERE status = 'active'")
+        rows = await conn.fetch("SELECT * FROM keno_autoplay_sessions WHERE status = 'active' ORDER BY id")
     for row in rows:
         session = _session_from_row(row)
         try:
-            await keno_tickets.place_ticket(
-                pool, redis,
-                user_id=session.user_id,
-                picks=list(session.picks),
-                stake=session.stake,
-                idempotency_key=f"autoplay:{session.id}:{round_id}",
-                autoplay_session_id=session.id,
-            )
-        except keno_tickets.TicketRejected as exc:
-            await _stop_internal(pool, session.id, status="stopped", reason=f"ticket_rejected:{exc.code}")
-            logger.info("keno_autoplay_session_stopped_on_rejection", session_id=session.id, reason=exc.code)
-            continue
+            await _place_for_session(pool, redis, session, round_id=round_id)
+        except Exception:
+            logger.exception("keno_autoplay_placement_failed", session_id=session.id, round_id=round_id)
+            metrics.keno_autoplay_errors_total.labels(stage="placement").inc()
+            await _stop_after_error(pool, session.id, reason="placement_error")
 
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE keno_autoplay_sessions SET rounds_placed = rounds_placed + 1, last_round_id = $2, "
-                "updated_at = now() WHERE id = $1",
-                session.id, round_id,
-            )
-        # Exhaustion (rounds_total reached) is checked right after
-        # placing, not after settlement -- "bought N rounds" means
-        # exactly N tickets placed, independent of how they each turn
-        # out. +1 accounts for the ticket just placed above, since
-        # session.rounds_placed was read before that UPDATE.
-        if session.rounds_total is not None and session.rounds_placed + 1 >= session.rounds_total:
-            await _stop_internal(pool, session.id, status="exhausted", reason="rounds_exhausted")
+
+async def _place_for_session(pool: asyncpg.Pool, redis: Redis, session: AutoplaySession, *, round_id: int) -> None:
+    try:
+        await keno_tickets.place_ticket(
+            pool, redis,
+            user_id=session.user_id,
+            picks=list(session.picks),
+            stake=session.stake,
+            idempotency_key=f"autoplay:{session.id}:{round_id}",
+            autoplay_session_id=session.id,
+        )
+    except keno_tickets.TicketRejected as exc:
+        await _stop_internal(pool, session.id, status="stopped", reason=f"ticket_rejected:{exc.code}")
+        logger.info("keno_autoplay_session_stopped_on_rejection", session_id=session.id, reason=exc.code)
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE keno_autoplay_sessions SET rounds_placed = rounds_placed + 1, last_round_id = $2, "
+            "updated_at = now() WHERE id = $1",
+            session.id, round_id,
+        )
+    # Exhaustion (rounds_total reached) is checked right after
+    # placing, not after settlement -- "bought N rounds" means
+    # exactly N tickets placed, independent of how they each turn
+    # out. +1 accounts for the ticket just placed above, since
+    # session.rounds_placed was read before that UPDATE.
+    if session.rounds_total is not None and session.rounds_placed + 1 >= session.rounds_total:
+        await _stop_internal(pool, session.id, status="exhausted", reason="rounds_exhausted")
+
+
+async def _stop_after_error(pool: asyncpg.Pool, session_id: int, *, reason: str) -> None:
+    """Best effort: if the database is what failed, this can fail too. The
+    session then stays active and the same path is retried next round --
+    still without letting the error escape to the caller's loop."""
+    try:
+        await _stop_internal(pool, session_id, status="stopped", reason=reason)
+    except Exception:
+        logger.exception("keno_autoplay_stop_after_error_failed", session_id=session_id, reason=reason)
 
 
 async def record_settlement(
@@ -254,3 +282,23 @@ async def record_settlement(
         await _stop_internal(pool, session.id, status="stopped", reason="stop_on_win")
     elif session.stop_on_loss_amount is not None and session.net_position <= -session.stop_on_loss_amount:
         await _stop_internal(pool, session.id, status="stopped", reason="stop_on_loss")
+
+
+async def record_settlement_safely(
+    pool: asyncpg.Pool, *, autoplay_session_id: int | None, stake: Decimal, payout: Decimal, jackpot_payout: Decimal
+) -> None:
+    """record_settlement() for the engine's per-ticket post-settlement
+    loop: never raises, so one ticket's failure can't skip the tickets
+    after it. If this ticket's result couldn't be added to the session's
+    net position, the stop-on-win/loss thresholds the player chose can no
+    longer be trusted -- the session is stopped ('settlement_error')
+    rather than left running on a wrong total."""
+    try:
+        await record_settlement(
+            pool, autoplay_session_id=autoplay_session_id, stake=stake, payout=payout, jackpot_payout=jackpot_payout
+        )
+    except Exception:
+        logger.exception("keno_autoplay_record_settlement_failed", session_id=autoplay_session_id)
+        metrics.keno_autoplay_errors_total.labels(stage="settlement").inc()
+        if autoplay_session_id is not None:
+            await _stop_after_error(pool, autoplay_session_id, reason="settlement_error")

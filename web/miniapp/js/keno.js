@@ -485,7 +485,8 @@ function announceAutoplayEnded(session) {
   if (session.stop_reason.startsWith("ticket_rejected:")) {
     const code = session.stop_reason.slice("ticket_rejected:".length);
     key = ERROR_KEYS.has(code) ? `keno.error.${code}` : "keno.autoplay_error.generic";
-  } else if (!["manual", "rounds_exhausted", "stop_on_win", "stop_on_loss"].includes(session.stop_reason)) {
+  } else if (!["manual", "rounds_exhausted", "stop_on_win", "stop_on_loss", "placement_error", "settlement_error"]
+    .includes(session.stop_reason)) {
     key = "keno.autoplay_error.generic";
   }
   const won = session.net_position && Number(session.net_position) > 0;

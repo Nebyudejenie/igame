@@ -463,10 +463,19 @@ class KenoRoundEngine:
                             Decimal(ticket["stake"]), ticket["autoplay_session_id"],
                         ))
 
+        # Everything here runs after the money has committed, once per
+        # ticket. Isolated per ticket: one player's failed push or autoplay
+        # update must not skip the players after them (a skipped
+        # record_settlement is never replayed -- a retried settlement
+        # finds the ticket already settled).
         for user_id, ticket_id, matches, payout, jackpot_payout, stake, autoplay_session_id in to_publish:
-            _publish_private_ticket_settled(self._redis, user_id, round_id, ticket_id, matches, payout, jackpot_payout)
-            await ledger.publish_balance_update(self._pool, self._redis, user_id)
-            await keno_autoplay.record_settlement(
+            try:
+                _publish_private_ticket_settled(self._redis, user_id, round_id, ticket_id, matches, payout, jackpot_payout)
+                await ledger.publish_balance_update(self._pool, self._redis, user_id)
+            except Exception:
+                # A missed push only; the client re-reads state on its next event.
+                logger.exception("keno_ticket_settled_publish_failed", round_id=round_id, ticket_id=ticket_id)
+            await keno_autoplay.record_settlement_safely(
                 self._pool, autoplay_session_id=autoplay_session_id, stake=stake, payout=payout,
                 jackpot_payout=jackpot_payout,
             )
