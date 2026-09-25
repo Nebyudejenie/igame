@@ -401,8 +401,12 @@ async def set_user_status(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # FOR NO KEY UPDATE (the lock the UPDATE below takes anyway):
+            # FOR UPDATE also blocked every foreign-key insert for this
+            # player -- a Bingo join, a Keno ticket -- for the length of
+            # this transaction (test_player_row_lock_order.py).
             before = await conn.fetchval(
-                "SELECT status FROM users WHERE id = $1 FOR UPDATE", user_id
+                "SELECT status FROM users WHERE id = $1 FOR NO KEY UPDATE", user_id
             )
             if before == "self_excluded":
                 raise InvalidStatusTransition(
@@ -458,8 +462,9 @@ async def set_kyc_level(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # FOR NO KEY UPDATE, for the same reason as set_user_status().
             before = await conn.fetchval(
-                "SELECT kyc_level FROM users WHERE id = $1 FOR UPDATE", user_id
+                "SELECT kyc_level FROM users WHERE id = $1 FOR NO KEY UPDATE", user_id
             )
             if before is None:
                 raise InvalidKycLevel(f"no such user: {user_id}")

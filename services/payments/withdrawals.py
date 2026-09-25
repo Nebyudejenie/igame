@@ -120,8 +120,16 @@ async def request_withdrawal(
 
         async with pool.acquire() as conn:
             async with conn.transaction():
+                # FOR NO KEY UPDATE, not FOR UPDATE: it still serializes two
+                # withdrawal requests (and a KYC or status change) for this
+                # player, but doesn't block the FOR KEY SHARE every foreign-key
+                # insert referencing the player takes. FOR UPDATE deadlocked
+                # this request against Bingo settlement paying the same player:
+                # settlement locks user_cash (payout post) and then wants this
+                # row for round_winners' foreign key, while this held this row
+                # and waited for user_cash (test_player_row_lock_order.py).
                 user = await conn.fetchrow(
-                    "SELECT kyc_level, created_at, is_simulated FROM users WHERE id = $1 FOR UPDATE",
+                    "SELECT kyc_level, created_at, is_simulated FROM users WHERE id = $1 FOR NO KEY UPDATE",
                     user_id,
                 )
                 if user is None:
