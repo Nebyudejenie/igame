@@ -94,7 +94,11 @@ function _settleAuthResolvers(outcome, value) {
 }
 
 function dispatch(message) {
-  if (typeof message.server_time === "number") {
+  // Epoch milliseconds only. One offset is shared by every countdown in the
+  // app (Bingo lobby, rooms list, Keno betting), so a frame carrying epoch
+  // *seconds* -- Keno's betting.open once did -- must not reset it: it
+  // knocked every countdown ~55 years out until the next pong repaired it.
+  if (typeof message.server_time === "number" && message.server_time > 1e12) {
     setState({ serverTimeOffsetMs: message.server_time - Date.now() });
   }
   const handlers = messageHandlers.get(message.t);

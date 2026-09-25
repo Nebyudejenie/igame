@@ -234,7 +234,10 @@ class KenoRoundEngine:
             {
                 "t": "keno.betting.open",
                 "round_id": ctx.id,
-                "server_time": time.time(),
+                # Milliseconds, like every gateway frame: the Mini App resets one
+                # shared clock offset from any frame carrying server_time, and
+                # every connection receives keno:live (test_miniapp_server_clock_e2e.py).
+                "server_time": int(time.time() * 1000),
                 "server_seed_hash": ctx.server_seed_hash,
                 "betting_seconds": ctx.config["betting_seconds"],
                 "min_picks": ctx.config["min_picks"],
