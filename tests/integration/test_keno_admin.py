@@ -462,3 +462,64 @@ async def test_beta_allowlist_add_list_remove_over_http(admin_server, pool, conn
         )
     assert removed.status_code == 200, removed.text
     assert removed.json() == {"removed": True}
+
+
+# --- rounds browser / reports (admin Keno UI backends) ------------------------
+
+
+async def _seed_round_with_ticket(conn, *, status: str, drawn: list[int] | None) -> tuple[int, int]:
+    config_id = await conn.fetchval("SELECT id FROM keno_configs ORDER BY id DESC LIMIT 1")
+    tier_id = await conn.fetchval("SELECT id FROM keno_risk_tiers ORDER BY id DESC LIMIT 1")
+    paytable_id = await conn.fetchval("SELECT id FROM keno_paytables ORDER BY id DESC LIMIT 1")
+    round_id = await conn.fetchval(
+        "INSERT INTO keno_rounds (seq, status, config_id, tier_id, server_seed, server_seed_hash, drawn_numbers) "
+        "VALUES ((SELECT COALESCE(MAX(seq),0)+1 FROM keno_rounds), $1, $2, $3, $4, 'h', $5) RETURNING id",
+        status, config_id, tier_id, b"secret-seed", drawn,
+    )
+    user_id = await create_funded_user(conn, Decimal("0"))
+    await conn.execute(
+        "INSERT INTO keno_tickets (round_id, user_id, paytable_id, pick_count, stake, status, payout, idempotency_key) "
+        "VALUES ($1, $2, $3, 1, 10, 'lost', 0, $4)",
+        round_id, user_id, paytable_id, f"test-admin-round-{uuid.uuid4()}",
+    )
+    return round_id, user_id
+
+
+async def test_rounds_browser_lists_and_details_a_round_over_http(admin_server, pool, conn):
+    round_id, user_id = await _seed_round_with_ticket(conn, status="completed", drawn=[1, 2, 3])
+    headers = await _auth_headers(admin_server, pool, role="support")  # keno:view is enough
+    async with httpx.AsyncClient() as client:
+        listed = await client.get(f"{admin_server}/keno/rounds", headers=headers, params={"limit": 200})
+        detail = await client.get(f"{admin_server}/keno/rounds/{round_id}", headers=headers)
+        missing = await client.get(f"{admin_server}/keno/rounds/999999999", headers=headers)
+    assert listed.status_code == 200
+    assert any(r["id"] == round_id for r in listed.json())
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["round"]["drawn_numbers"] == [1, 2, 3]
+    assert [t["user_id"] for t in body["tickets"]] == [user_id]
+    assert missing.status_code == 404
+
+
+async def test_round_detail_hides_a_live_rounds_seed_and_draw(admin_server, pool, conn):
+    # Same terminal-only rule as the player API: a live round's draw is
+    # persisted before it's revealed, and an admin screen must not leak it.
+    round_id, _ = await _seed_round_with_ticket(conn, status="drawing", drawn=[4, 5, 6])
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    async with httpx.AsyncClient() as client:
+        detail = await client.get(f"{admin_server}/keno/rounds/{round_id}", headers=headers)
+    assert detail.json()["round"]["drawn_numbers"] is None
+    assert detail.json()["round"]["server_seed"] is None
+
+
+async def test_reports_endpoints_return_real_shapes_over_http(admin_server, pool, conn):
+    await _seed_round_with_ticket(conn, status="completed", drawn=[7])
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    async with httpx.AsyncClient() as client:
+        daily = await client.get(f"{admin_server}/keno/reports/daily", headers=headers, params={"days": 3})
+        kpis = await client.get(f"{admin_server}/keno/reports/kpis", headers=headers)
+    assert daily.status_code == 200
+    today = daily.json()[0]
+    assert Decimal(today["ggr"]) == Decimal(today["handle"]) - Decimal(today["paid"])
+    assert kpis.status_code == 200
+    assert {"dau", "hold_pct", "arpdau", "d1_retention", "player_ltv"} <= set(kpis.json())

@@ -15,13 +15,14 @@ re-reads "what's currently active" at round-creation time.
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import asyncpg
 
-from packages.core import keno, keno_config, keno_risk_simulator, ledger, metrics
+from packages.core import keno, keno_business_metrics, keno_config, keno_risk_simulator, ledger, metrics
 from services.admin import audit
 
 
@@ -653,3 +654,132 @@ async def remove_from_beta_allowlist_admin(
                 reason=reason, ip_address=ip_address,
             )
     return {"removed": removed}
+
+
+# ---------------------------------------------------------------------------
+# Read-only views for the admin Keno screens (rounds browser, reports).
+# ---------------------------------------------------------------------------
+
+
+async def list_rounds_admin(
+    pool: asyncpg.Pool, *, limit: int = 50, before_id: int | None = None, status: str | None = None
+) -> list[dict[str, Any]]:
+    limit = min(max(limit, 1), 200)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, seq, status, tier_id, ticket_count, total_stake, total_payout, projected_exposure,
+                   jackpot_hit, scheduled_at, betting_closed_at, completed_at, failure_reason
+            FROM keno_rounds
+            WHERE ($1::bigint IS NULL OR id < $1) AND ($2::text IS NULL OR status = $2)
+            ORDER BY id DESC LIMIT $3
+            """,
+            before_id,
+            status,
+            limit,
+        )
+    return [_json_safe(row) for row in rows]
+
+
+async def round_detail_admin(pool: asyncpg.Pool, round_id: int) -> dict[str, Any] | None:
+    """Everything an operator investigating one round needs in one read:
+    the round itself (draw included once terminal -- admins are trusted
+    staff, but the same terminal-only rule as the player API keeps an
+    admin screen from ever leaking a live draw), its tickets, and its
+    audited state transitions."""
+    async with pool.acquire() as conn:
+        round_row = await conn.fetchrow("SELECT * FROM keno_rounds WHERE id = $1", round_id)
+        if round_row is None:
+            return None
+        tickets = await conn.fetch(
+            """
+            SELECT t.id, t.user_id, t.pick_count, t.stake, t.status, t.matches, t.payout, t.jackpot_payout,
+                   t.created_at, array_agg(s.number ORDER BY s.number) AS picks
+            FROM keno_tickets t LEFT JOIN keno_ticket_selections s ON s.ticket_id = t.id
+            WHERE t.round_id = $1 GROUP BY t.id ORDER BY t.id
+            """,
+            round_id,
+        )
+        events = await conn.fetch(
+            "SELECT from_status, to_status, worker_id, reason, created_at FROM keno_round_events "
+            "WHERE round_id = $1 ORDER BY created_at",
+            round_id,
+        )
+    terminal = round_row["status"] in ("completed", "failed", "voided")
+    detail = _json_safe(round_row)
+    if not terminal:
+        detail["server_seed"] = None
+        detail["drawn_numbers"] = None
+    return {
+        "round": detail,
+        "tickets": [_json_safe(t) for t in tickets],
+        "events": [_json_safe(e) for e in events],
+    }
+
+
+async def daily_report_admin(pool: asyncpg.Pool, *, days: int = 14) -> list[dict[str, Any]]:
+    """Per UTC day: handle, payouts, GGR, hold, ticket and player counts --
+    settled tickets only, simulated players excluded, the same rules as
+    packages/core/keno_business_metrics.py so the two never disagree."""
+    days = min(max(days, 1), 90)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT date_trunc('day', t.created_at AT TIME ZONE 'UTC') AS day,
+                   sum(t.stake) AS handle,
+                   sum(COALESCE(t.payout, 0) + COALESCE(t.jackpot_payout, 0)) AS paid,
+                   count(*) AS tickets,
+                   count(DISTINCT t.user_id) AS players,
+                   count(DISTINCT t.round_id) AS rounds
+            FROM keno_tickets t JOIN users u ON u.id = t.user_id
+            WHERE t.status IN ('won', 'lost') AND NOT u.is_simulated
+              AND t.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                                  - make_interval(days => $1 - 1)
+            GROUP BY 1 ORDER BY 1 DESC
+            """,
+            days,
+        )
+    report = []
+    for row in rows:
+        handle = Decimal(row["handle"])
+        ggr = handle - Decimal(row["paid"])
+        report.append(
+            {
+                "day": row["day"].date().isoformat(),
+                "handle": str(handle),
+                "paid": str(Decimal(row["paid"])),
+                "ggr": str(ggr),
+                "hold_pct": str((ggr / handle).quantize(Decimal("0.0001"))) if handle else None,
+                "tickets": row["tickets"],
+                "players": row["players"],
+                "rounds": row["rounds"],
+            }
+        )
+    return report
+
+
+async def business_metrics_admin(pool: asyncpg.Pool) -> dict[str, Any]:
+    """A live snapshot of the Part 8 KPIs, computed on request with the
+    exact code keno-worker uses for its gauges. NaN retention (an empty
+    cohort) is returned as null -- JSON has no NaN."""
+    m = await keno_business_metrics.compute(pool)
+
+    def _num(value: float) -> float | None:
+        return None if math.isnan(value) else value
+
+    return {
+        "dau": m.dau,
+        "sessions": m.sessions,
+        "sessions_per_user": m.sessions_per_user,
+        "rounds_per_session": m.rounds_per_session,
+        "tickets_per_round": m.tickets_per_round,
+        "avg_stake": str(m.avg_stake),
+        "hold_pct": m.hold_pct,
+        "ggr": str(m.ggr),
+        "arpdau": str(m.arpdau),
+        "d1_retention": _num(m.d1_retention),
+        "d7_retention": _num(m.d7_retention),
+        "d30_retention": _num(m.d30_retention),
+        "player_ltv": str(m.player_ltv),
+        "deposit_conversion_rate": _num(m.deposit_conversion_rate),
+    }

@@ -1707,6 +1707,38 @@ async def set_keno_current_tier(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.get("/keno/rounds")
+async def list_keno_rounds(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))],
+    limit: int = 50,
+    before_id: int | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return await keno_queries.list_rounds_admin(app.state.pool, limit=limit, before_id=before_id, status=status)
+
+
+@app.get("/keno/rounds/{round_id}")
+async def get_keno_round(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))], round_id: int
+) -> dict[str, Any]:
+    detail = await keno_queries.round_detail_admin(app.state.pool, round_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="round not found")
+    return detail
+
+
+@app.get("/keno/reports/daily")
+async def keno_daily_report(
+    admin: Annotated[AdminSession, Depends(require("keno:view"))], days: int = 14
+) -> list[dict[str, Any]]:
+    return await keno_queries.daily_report_admin(app.state.pool, days=days)
+
+
+@app.get("/keno/reports/kpis")
+async def keno_kpis(admin: Annotated[AdminSession, Depends(require("keno:view"))]) -> dict[str, Any]:
+    return await keno_queries.business_metrics_admin(app.state.pool)
+
+
 @app.get("/keno/beta-allowlist")
 async def list_keno_beta_allowlist(
     admin: Annotated[AdminSession, Depends(require("keno:view"))],
