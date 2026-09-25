@@ -212,16 +212,31 @@ All six terms have a corresponding Prometheus gauge declared in
 metrics (`keno_arpdau`, `keno_d1/d7/d30_retention`, `keno_player_ltv`,
 `keno_deposit_conversion_rate`, `keno_session_duration_seconds`).
 
-**Checked directly while writing this document — none of them are
-currently populated anywhere outside their own declaration.** No
-scheduled job, admin endpoint, or engine code path sets any of these
-eleven gauges; every one of them would currently read as Prometheus's
-default (effectively zero), not a real trailing figure. The gauges
-exist; the analytics computation that should feed them does not yet.
-This is a real, open gap against the spec's Definition of Done ("All
-six revenue-model terms exposed as metrics") — flagged here rather
-than left to be discovered later, and **not fixed in this documentation
-pass**: building the actual cohort/retention/session-tracking
-computation is a real engineering task (deciding what counts as a
-"session," where D1/D7/D30 cohorts are tracked from, how LTV is
-windowed), not something to invent defaults for while writing docs.
+**Populated as of 2026-09-25.** `packages/core/keno_business_metrics.py`
+computes all of them from stored data, and `keno-worker` refreshes the
+gauges every 60 seconds (on every replica, since the queries are read-only).
+The definitions, chosen so the formula above multiplies out *exactly* to
+the real trailing-24h GGR (a test proves this, `tests/integration/
+test_keno_business_metrics.py::test_decomposition_multiplies_out_to_real_ggr`):
+
+| Term | Definition |
+|---|---|
+| Window | Trailing 24h. Settled tickets only (won/lost); pending and refunded excluded. Simulated players excluded everywhere. |
+| **Session** | A player's run of tickets with no gap longer than **30 minutes** between consecutive tickets (the standard web-analytics inactivity window). Derived from `keno_tickets.created_at`, so no client tracking. **Limitation**: measures the span of betting, not screen time. A player who watches for an hour and bets once has a zero-length session. |
+| DAU | Distinct players with a settled ticket in the window. |
+| sessions/user | Sessions ÷ DAU. |
+| rounds/session | Distinct rounds per session, averaged. |
+| tickets/round | Tickets per (player, round) participation, not per round overall. This is what makes the product multiply out. |
+| avg stake | Handle ÷ tickets. |
+| hold | (stake − base payout − jackpot payout) ÷ stake. The jackpot is player-funded, but it is still money paid back out of stakes. |
+| ARPDAU | GGR ÷ DAU. |
+| LTV | Mean lifetime (stake − payouts) of players active in the trailing 30 days. It measures the *current* player base, not every long-churned account. |
+| D1/D7/D30 | Of players whose first-ever settled ticket fell on UTC day X, the fraction who played on day X+n, for the latest X where day X+n is complete. **NaN, not 0, when the cohort is empty.** "No data" and "everyone churned" are different facts. |
+| deposit conversion | Platform-wide (deposits aren't per-game): succeeded ÷ deposits that reached a terminal state in the window. Pending, processing and review deposits are excluded, not counted as failures. |
+| session duration | Histogram. Each closed session (last ticket more than 30 minutes ago) is observed once per process. A restarted worker never observes sessions that closed while it was down, a small documented undercount rather than a double count. |
+
+**Still true**: these gauges only reach anyone if a Prometheus instance
+scrapes `keno-worker`'s `/metrics`, and production has none today (see
+`docs/ops/vps-migration.md`). Every query here also scans the ticket table
+each minute. That's fine at launch volume, and something to index or
+pre-aggregate once real traffic makes it measurable.

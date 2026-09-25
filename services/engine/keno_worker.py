@@ -30,6 +30,7 @@ from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
+from packages.core import keno_business_metrics
 from services.engine.keno_round_engine import KenoRoundEngine
 
 logger = structlog.get_logger()
@@ -44,6 +45,13 @@ METRICS_PORT = 8008
 # enough not to hammer Redis with acquire attempts from an idle standby
 # replica.
 RETRY_INTERVAL_SECONDS = 5
+
+# Part 8 business gauges (packages/core/keno_business_metrics.py). Every
+# replica refreshes them -- they're read-only aggregate queries, so a
+# standby replica computing the same numbers is harmless and means the
+# gauges stay live regardless of which replica currently owns the round
+# lock. 60s matches the resolution anyone would chart these at.
+BUSINESS_METRICS_INTERVAL_SECONDS = 60
 
 
 def main() -> None:
@@ -89,6 +97,20 @@ def main() -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, _handle_stop_signal)
 
+        async def _business_metrics_loop() -> None:
+            publisher = keno_business_metrics.Publisher()
+            while not stop_event.is_set():
+                try:
+                    await publisher.publish(pool)
+                except Exception:
+                    # Never allowed to affect the round loop -- a failed
+                    # analytics query is a stale dashboard, not an outage.
+                    logger.exception("keno_business_metrics_failed")
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stop_event.wait(), timeout=BUSINESS_METRICS_INTERVAL_SECONDS)
+
+        metrics_task = asyncio.create_task(_business_metrics_loop())
+
         try:
             while not stop_event.is_set():
                 try:
@@ -107,6 +129,9 @@ def main() -> None:
                     await asyncio.wait_for(stop_event.wait(), timeout=RETRY_INTERVAL_SECONDS)
         finally:
             engine.stop()
+            metrics_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await metrics_task
             await metrics_runner.cleanup()
             await redis.aclose()
             await pool.close()

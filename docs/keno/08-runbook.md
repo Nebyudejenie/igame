@@ -191,7 +191,8 @@ Honest, not exhaustive — see each linked doc for more:
   it, none of them can actually fire today. See `docs/ops/
   vps-migration.md` for the full note — worth resolving as its own
   piece of work, not assumed fixed by these rules existing.
-- Revenue/cohort analytics metrics are declared but not populated —
-  see `07-economics-and-bankroll.md`'s own section on this. Not
-  relevant to incident response, but relevant if you're asked "what's
-  today's Keno hold %" and the dashboard shows zero.
+- Revenue/cohort analytics metrics are populated as of 2026-09-25
+  (`packages/core/keno_business_metrics.py`, refreshed every 60s by
+  `keno-worker`). A retention gauge reading NaN means the cohort is
+  empty, not zero retention. See `07-economics-and-bankroll.md` for
+  every definition.
