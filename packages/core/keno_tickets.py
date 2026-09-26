@@ -193,6 +193,18 @@ async def _place_ticket(
     except keno.KenoError as exc:
         raise InvalidPicks(str(exc)) from exc
 
+    # The caller's key (a player-chosen string from the Mini App, or
+    # autoplay's own) is namespaced to this player before it goes anywhere
+    # near the ledger. ledger_transactions.idempotency_key is one global
+    # namespace across every kind, and a raw player string there let a
+    # player reuse any existing key for a ticket with no stake taken, claim
+    # a key another operation hadn't posted yet (a Bingo settlement, a
+    # deposit) so it silently moved no money, or read back another player's
+    # ticket by sending their key (platform audit, 2026-09-25;
+    # test_ledger_key_isolation.py). Stored namespaced in keno_tickets too,
+    # which scopes the replay lookup below to this player.
+    ledger_key = f"keno:stake:{user_id}:{idempotency_key}"
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             # Idempotency short-circuit -- a genuine retry (client
@@ -201,7 +213,7 @@ async def _place_ticket(
             # lock is taken, since a replay should be cheap.
             existing = await conn.fetchrow(
                 "SELECT id, round_id, user_id, stake, status FROM keno_tickets WHERE idempotency_key = $1",
-                idempotency_key,
+                ledger_key,
             )
             if existing is not None:
                 return PlacedTicket(
@@ -362,7 +374,7 @@ async def _place_ticket(
                         ledger.Entry(reserve_account.id, reserve_cut),
                         ledger.Entry(jackpot_account.id, jackpot_cut),
                     ],
-                    idempotency_key=idempotency_key,
+                    idempotency_key=ledger_key,
                     created_by="keno_tickets.place_ticket",
                 )
             except ledger.InsufficientFunds as exc:
@@ -392,7 +404,7 @@ async def _place_ticket(
                 stake,
                 ticket_risk.expected_payout,
                 ticket_risk.payout_variance,
-                idempotency_key,
+                ledger_key,
                 stake_txn.id,
                 autoplay_session_id,
             )

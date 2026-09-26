@@ -32,6 +32,23 @@ AsyncpgConnection = asyncpg.Connection | asyncpg.pool.PoolConnectionProxy
 USER_BALANCE_KINDS = frozenset({"user_cash", "user_bonus", "user_locked"})
 
 
+class IdempotencyKeyConflict(Exception):
+    """post() was given a key that already belongs to a *different*
+    operation (another kind, round or payment). Idempotency keys are one
+    namespace across every kind, so treating that as a replay would report
+    money as moved when it never was -- the silent failure a platform audit
+    (2026-09-25) found reachable through a player-chosen Keno key."""
+
+    def __init__(self, idempotency_key: str, *, existing_kind: str, requested_kind: str) -> None:
+        self.idempotency_key = idempotency_key
+        self.existing_kind = existing_kind
+        self.requested_kind = requested_kind
+        super().__init__(
+            f"idempotency key {idempotency_key!r} already belongs to a {existing_kind!r} transaction; "
+            f"refusing to treat this {requested_kind!r} post as its replay"
+        )
+
+
 class InsufficientFunds(Exception):
     def __init__(self, account_id: int, attempted_balance: Decimal) -> None:
         self.account_id = account_id
@@ -202,6 +219,16 @@ async def post(
                 idempotency_key,
             )
             assert existing is not None
+            # A genuine replay is the same operation: same kind, and the same
+            # round/payment when the caller names one. Anything else is a key
+            # collision between two operations, and returning the existing row
+            # would silently drop this caller's money movement.
+            if (
+                existing["kind"] != kind
+                or (round_id is not None and existing["round_id"] != round_id)
+                or (payment_id is not None and existing["payment_id"] != payment_id)
+            ):
+                raise IdempotencyKeyConflict(idempotency_key, existing_kind=existing["kind"], requested_kind=kind)
             return LedgerTransaction(**dict(existing))
 
         transaction_id = txn_row["id"]

@@ -176,6 +176,40 @@ async def test_place_ticket_rejects_invalid_picks_with_typed_error(gateway_serve
     assert response.json()["detail"] == "invalid_picks"
 
 
+@pytest.mark.parametrize("bad_key", ["short", "has spaces in it", "x" * 129, "semi;colon-key", "\u00e9t\u00e9-key-accented"])
+async def test_place_ticket_rejects_a_malformed_idempotency_key(gateway_server, pool, conn, bad_key):
+    await _seed_open_round(conn)
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+        response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/tickets",
+            headers={"Authorization": f"tma {init_data}"},
+            json={"picks": [7], "stake": "10", "idempotency_key": bad_key},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid_idempotency_key"
+
+
+async def test_the_mini_apps_own_key_format_is_accepted(gateway_server, pool, conn):
+    """web/miniapp/js/keno.js builds keno-{roundId}-{Date.now()}-{base36}."""
+    round_id = await _seed_open_round(conn)
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    await fund_user(conn, user_id, Decimal("100.00"))
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{http_base(gateway_server)}/api/keno/tickets",
+            headers={"Authorization": f"tma {init_data}"},
+            json={"picks": [7], "stake": "10", "idempotency_key": f"keno-{round_id}-1790380000123-k3x9q2z1ab"},
+        )
+    assert response.status_code == 200, response.text
+
+
 async def test_round_detail_endpoint_exposes_verification_payload_once_terminal(gateway_server, pool, conn):
     round_id = await _seed_open_round(conn)
     # Force the round straight to a terminal, seed-revealed state for this

@@ -10,6 +10,7 @@ currently-open connections, both scoped to this process's lifetime.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
@@ -488,6 +489,9 @@ async def api_keno_state(authorization: str = Header(default="")) -> dict[str, A
     return state
 
 
+_KENO_IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9_:-]{8,128}")
+
+
 class PlaceKenoTicketRequest(BaseModel):
     picks: list[int]
     stake: str
@@ -517,6 +521,11 @@ async def api_place_keno_ticket(
         raise HTTPException(status_code=422, detail="invalid_stake")
     if not body.idempotency_key.strip():
         raise HTTPException(status_code=422, detail="missing_idempotency_key")
+    # The Mini App's own keys look like keno-{round}-{ms}-{random}. The real
+    # protection is place_ticket() namespacing the key per player; this just
+    # refuses arbitrary strings (length, characters) at the edge.
+    if not _KENO_IDEMPOTENCY_KEY.fullmatch(body.idempotency_key):
+        raise HTTPException(status_code=422, detail="invalid_idempotency_key")
 
     try:
         ticket = await keno_tickets.place_ticket(
