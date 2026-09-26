@@ -49,6 +49,16 @@ one test leaves behind that another test's query then picks up.
   load on the shared DB and Redis), but **the root cause was not
   investigated**.
 
+### `test_miniapp_e2e.py` (3 tests) when run together with the emergency-stop e2e files
+
+- Seen 2026-09-26: `test_a_player_who_took_a_card_in_an_underfilled_round_is_not_left_frozen_at_zero`,
+  `test_rooms_screen_shows_a_real_online_and_playing_headcount` and
+  `test_spectate_shows_the_admin_configured_announcement_marquee` failed in
+  one combined run of `test_miniapp_e2e.py`, `test_emergency_room_stop_e2e.py`
+  and `test_bingo_rules_admin_e2e.py`. All three passed alone, and the whole of
+  `test_miniapp_e2e.py` then passed 26/26. **Root cause not investigated.**
+  Probably related to the `test_emergency_room_stop.py` entry above.
+
 ## Hazards for anyone writing a new test
 
 - **Future-dated config rows exist** in the dev DB. Always read Keno

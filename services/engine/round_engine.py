@@ -404,6 +404,21 @@ class RoundEngine:
                         # no cross-purpose key collision to worry about.
                         await conn.execute("SELECT pg_advisory_xact_lock($1)", user_id)
 
+                        # The round's real status, locked, not this engine's
+                        # in-memory one: an admin void or emergency stop
+                        # refunds the round from another process and never
+                        # tells this engine, which keeps saying 'lobby'. A
+                        # stake taken into that voided round is one nothing
+                        # would ever refund (platform audit, 2026-09-25;
+                        # test_bingo_external_void.py). Locked before any
+                        # balance row, the same order refund_round() and
+                        # settlement take it in.
+                        round_status = await conn.fetchval(
+                            "SELECT status FROM rounds WHERE id = $1 FOR NO KEY UPDATE", round_id
+                        )
+                        if round_status != "lobby":
+                            return JoinResult(False, "not_joinable")
+
                         block = await responsible_gaming.check_stake_allowed(
                             conn, user_id, self._room.stake
                         )
@@ -474,6 +489,28 @@ class RoundEngine:
         assert round_id is not None
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                # The round's real status, locked, and the entry actually
+                # removed, before any money moves: if the round was already
+                # refunded (an admin void, or this engine's own underfilled-
+                # lobby refund racing the drop), this card's stake is already
+                # back with the player. The drop's own refund carries a
+                # different key (drop- vs refund-), so nothing else would stop
+                # it paying the stake back twice (platform audit, 2026-09-25;
+                # test_bingo_external_void.py).
+                round_status = await conn.fetchval(
+                    "SELECT status FROM rounds WHERE id = $1 FOR NO KEY UPDATE", round_id
+                )
+                if round_status != "lobby":
+                    return JoinResult(False, "not_droppable")
+                removed = await conn.fetchval(
+                    "DELETE FROM round_entries WHERE round_id = $1 AND user_id = $2 AND card_no = $3 "
+                    "RETURNING card_no",
+                    round_id,
+                    user_id,
+                    card_no,
+                )
+                if removed is None:
+                    return JoinResult(False, "not_in_round")
                 cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
                 pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
                 txn = await ledger.post(
@@ -482,12 +519,6 @@ class RoundEngine:
                     [Entry(pot_account.id, -self._room.stake), Entry(cash.id, self._room.stake)],
                     idempotency_key=f"drop-{round_id}-{user_id}-{card_no}",
                     round_id=round_id,
-                )
-                await conn.execute(
-                    "DELETE FROM round_entries WHERE round_id = $1 AND user_id = $2 AND card_no = $3",
-                    round_id,
-                    user_id,
-                    card_no,
                 )
                 await conn.execute(
                     "UPDATE rounds SET pot = pot - $1, player_count = player_count - 1 "
@@ -765,13 +796,23 @@ class RoundEngine:
         draw_order = bingo.derive_draw(self._server_seed, client_seed)
 
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            started = await conn.fetchval(
                 "UPDATE rounds SET status = 'running', client_seed = $2, "
-                "draw_order = $3, started_at = now() WHERE id = $1",
+                "draw_order = $3, started_at = now() WHERE id = $1 AND status = 'lobby' RETURNING id",
                 round_id,
                 client_seed,
                 draw_order,
             )
+        if started is None:
+            # Voided from outside this engine while its lobby ran (an admin
+            # void or emergency stop). Unguarded, this UPDATE flipped the
+            # voided round back to 'running', and it played out and settled:
+            # winners were paid from a pot that had already been refunded
+            # (platform audit, 2026-09-25; test_bingo_external_void.py).
+            logger.warning("round_voided_before_start", room_id=self._room.id, round_id=round_id)
+            await self._publish_room({"t": "round_voided", "round_id": round_id, "reason": "voided"})
+            self._reset_to_idle()
+            return
 
         self._set_status("running")
         self._client_seed = client_seed
