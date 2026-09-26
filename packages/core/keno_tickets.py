@@ -93,6 +93,13 @@ class InsufficientBalance(TicketRejected):
     code = "insufficient_balance"
 
 
+class AutoplaySessionNotActive(TicketRejected):
+    """An autoplay placement for a session the player has already stopped
+    (or that ended) since the round's session list was read."""
+
+    code = "autoplay_session_not_active"
+
+
 class SimulatedPlayerCannotPlaceKenoTicket(TicketRejected):
     """Same defense-in-depth as services/payments/withdrawals.py's
     SimulatedPlayerCannotWithdraw -- a house-float-funded simulated
@@ -211,20 +218,9 @@ async def _place_ticket(
             # timeout, double-tap) returns the original ticket rather
             # than re-validating/re-charging. Checked first, before any
             # lock is taken, since a replay should be cheap.
-            existing = await conn.fetchrow(
-                "SELECT id, round_id, user_id, stake, status FROM keno_tickets WHERE idempotency_key = $1",
-                ledger_key,
-            )
-            if existing is not None:
-                return PlacedTicket(
-                    id=existing["id"],
-                    round_id=existing["round_id"],
-                    user_id=existing["user_id"],
-                    picks=validated_picks,
-                    stake=existing["stake"],
-                    idempotency_key=idempotency_key,
-                    status=existing["status"],
-                )
+            replay = await _replayed_ticket(conn, ledger_key, validated_picks, idempotency_key)
+            if replay is not None:
+                return replay
 
             # Same pg_advisory_xact_lock(user_id) round_engine.py's own
             # join() takes, and for the identical reason (its own
@@ -260,6 +256,28 @@ async def _place_ticket(
                 raise UnknownUser(str(user_id))
             if user_row["is_simulated"]:
                 raise SimulatedPlayerCannotPlaceKenoTicket(str(user_id))
+
+            # Checked again now that this player's lock is held: two requests
+            # with the same key at once (a double-tap) could both pass the
+            # unlocked lookup above, and the second then hit the
+            # keno_tickets unique index as a raw 500 instead of getting the
+            # first one's ticket back (platform audit, 2026-09-25).
+            replay = await _replayed_ticket(conn, ledger_key, validated_picks, idempotency_key)
+            if replay is not None:
+                return replay
+
+            # An autoplay placement re-checks its own session under a row
+            # lock: place_for_active_sessions() read the session list before
+            # this round's placements started, so a player who pressed Stop
+            # in the meantime would otherwise still be charged for this
+            # round. stop_session()'s UPDATE takes the same row lock, so
+            # whichever commits first wins cleanly.
+            if autoplay_session_id is not None:
+                session_status = await conn.fetchval(
+                    "SELECT status FROM keno_autoplay_sessions WHERE id = $1 FOR NO KEY UPDATE", autoplay_session_id
+                )
+                if session_status != "active":
+                    raise AutoplaySessionNotActive(str(autoplay_session_id))
 
             block = await responsible_gaming.check_stake_allowed(conn, user_id, stake)
             if block.blocked:
@@ -441,6 +459,25 @@ async def _place_ticket(
                 idempotency_key=idempotency_key,
                 status="pending",
             )
+
+
+async def _replayed_ticket(
+    conn: ledger.AsyncpgConnection, ledger_key: str, picks: frozenset[int], client_key: str
+) -> PlacedTicket | None:
+    existing = await conn.fetchrow(
+        "SELECT id, round_id, user_id, stake, status FROM keno_tickets WHERE idempotency_key = $1", ledger_key
+    )
+    if existing is None:
+        return None
+    return PlacedTicket(
+        id=existing["id"],
+        round_id=existing["round_id"],
+        user_id=existing["user_id"],
+        picks=picks,
+        stake=existing["stake"],
+        idempotency_key=client_key,
+        status=existing["status"],
+    )
 
 
 async def _keno_reserve_balance(conn: ledger.AsyncpgConnection) -> Decimal:
