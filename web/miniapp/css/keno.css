@@ -343,6 +343,12 @@
   opacity: 0.45;
 }
 
+/* Shown with the insufficient-balance message: the one thing a player with
+   too little balance can do next. */
+#keno-deposit-btn {
+  margin-top: 8px;
+}
+
 /* --- autoplay / multi-race (packages/core/keno_autoplay.py) --- */
 
 .keno-autoplay-status-bar {
