@@ -206,20 +206,43 @@ async def revoke_bonus(conn: AsyncpgConnection, *, bonus_id: int) -> bool:
 async def wagering_progress_for_user_since(
     conn: AsyncpgConnection, *, user_id: int, since: datetime
 ) -> Decimal:
-    """Real cash wagered by this user since `since` -- a read against the
-    same ledger_entries/ledger_transactions history round_engine.py's own
-    join() already writes for every stake, filtered to entries on this
-    user's user_cash account with transaction kind 'stake'. Read-only:
-    nothing this feature ever does writes to this query's own inputs.
+    """Real, at-risk cash wagered by this user since `since`: Bingo stakes
+    debited from their user_cash, minus refunds of those same stakes. Read-
+    only: nothing this feature ever does writes to this query's own inputs.
+
+    Refunds are netted out (platform audit, 2026-09-25): a card taken and
+    dropped, or a lobby refunded for being underfilled, puts nothing at risk,
+    and counting it let a player clear a bonus -- which then converts to
+    withdrawable cash -- without ever risking a birr. A refund is matched to
+    its own stake through the static idempotency keys round_engine.py and
+    refunds.py already use (drop-/refund-{round}-{user}-{card} returns
+    stake-{round}-{user}-{card}), and only offsets a stake placed since
+    `since`, the same rule responsible_gaming.today_net_loss() applies to
+    its own window. Withdrawal refunds share the 'refund' kind but carry no
+    round_id, so they never match.
     """
     value = await conn.fetchval(
         """
-        SELECT COALESCE(SUM(-le.amount), 0)
-        FROM ledger_entries le
-        JOIN ledger_transactions lt ON lt.id = le.transaction_id
-        JOIN accounts a ON a.id = le.account_id
-        WHERE a.user_id = $1 AND a.kind = 'user_cash' AND lt.kind = 'stake'
-          AND le.created_at >= $2
+        WITH mine AS (
+            SELECT le.account_id, le.amount, lt.kind, lt.round_id, lt.idempotency_key
+            FROM ledger_entries le
+            JOIN ledger_transactions lt ON lt.id = le.transaction_id
+            JOIN accounts a ON a.id = le.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_cash' AND lt.kind IN ('stake', 'refund')
+              AND le.created_at >= $2
+        )
+        SELECT
+            COALESCE(SUM(-amount) FILTER (WHERE kind = 'stake'), 0)
+            - COALESCE(SUM(amount) FILTER (
+                WHERE kind = 'refund' AND round_id IS NOT NULL AND EXISTS (
+                    SELECT 1
+                    FROM ledger_transactions st
+                    JOIN ledger_entries se ON se.transaction_id = st.id AND se.account_id = mine.account_id
+                    WHERE st.idempotency_key = regexp_replace(mine.idempotency_key, '^(drop|refund)-', 'stake-')
+                      AND st.kind = 'stake' AND se.created_at >= $2
+                )
+            ), 0)
+        FROM mine
         """,
         user_id,
         since,
