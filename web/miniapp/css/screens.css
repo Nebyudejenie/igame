@@ -22,8 +22,10 @@
 
 .room-list-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  row-gap: 8px;
   margin-bottom: 12px;
 }
 
@@ -91,6 +93,7 @@
 
 .balance-pill .amount {
   font-family: var(--font-display);
+  white-space: nowrap;
 }
 
 .wallet-fab {
@@ -153,8 +156,26 @@
 
 .header-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 10px;
+  margin-left: auto;
+}
+
+/* With Keno's button added, four actions plus the balance no longer fit a
+   390px phone (the Wallet button was clipped off the right edge, found in
+   the 2026-09-25 player-experience pass). Tighter spacing first; if it
+   still doesn't fit (360px Android), the actions wrap to their own row
+   instead of overflowing. */
+@media (max-width: 420px) {
+  .header-actions {
+    gap: 6px;
+  }
+  .wallet-fab {
+    padding: 0 10px 0 8px;
+    gap: 4px;
+  }
 }
 
 .icon-fab {

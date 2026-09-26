@@ -234,6 +234,15 @@
   "keno.error.invalid_stake": "እባክዎ ትክክለኛ መደብ ያስገቡ።",
   "keno.error.missing_idempotency_key": "አሁን ማጠናቀቅ አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
   "keno.error.ticket_rejected": "ይህን ትኬት አሁን ማስገባት አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
+  "keno.empty_state_hint_after_ticket": "ትኬትዎ ገብቷል! ለሌላ ትኬት {min}–{max} ቁጥሮችን ይምረጡ፣ ወይም እጣውን ይጠብቁ",
+  "keno.autoplay_summary_one": "1 ቁጥር · በዙር {stake} ብር",
+  "keno.autoplay_error.win_amount_required": "ለማቆም የሚፈልጉትን የማሸነፊያ መጠን ያስገቡ።",
+  "keno.autoplay_error.loss_amount_required": "ለማቆም የሚፈልጉትን የማጣት መጠን ያስገቡ።",
+  "keno.autoplay_error.invalid_stake": "እባክዎ ትክክለኛ መደብ ይምረጡ።",
+  "keno.autoplay_error.invalid_stop_on_win_amount": "እባክዎ ትክክለኛ የማሸነፊያ መጠን ያስገቡ።",
+  "keno.autoplay_error.invalid_stop_on_loss_amount": "እባክዎ ትክክለኛ የማጣት መጠን ያስገቡ።",
+  "keno.onboard_step1_generic": "ቁጥሮችዎን ከሰሌዳው ይምረጡ።",
+  "keno.deposit_button": "ገቢ ያድርጉ",
   "keno.error.generic": "አሁን ማጠናቀቅ አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
 
   "keno.ticket_placed": "ትኬት ገብቷል!",
@@ -253,12 +262,12 @@
   "keno.result.jackpot_title": "ጃክፖት!",
   "keno.result.win_title": "ገበያ ደረሰ!",
   "keno.result.lose_title": "በዚህ ዙር አላሸነፉም",
-  "keno.result.no_win": "ቀጣይ ዙር ዕድልዎን ይሞክሩ",
+  "keno.result.no_win": "0.00 ብር",
   "keno.result.ticket_line": "{matches} ተመሳስለዋል — {amount} ብር",
 
   "keno.paytable_match_row": "ከ{picks} ውስጥ {matches} ተመሳስለዋል",
 
-  "keno.onboard_step1": "ከሰሌዳው ከ1 እስከ 10 ቁጥሮችን ይምረጡ።",
+  "keno.onboard_step1": "ከሰሌዳው ከ{min} እስከ {max} ቁጥሮችን ይምረጡ።",
   "keno.onboard_step2": "በየዙሩ 20 ቁጥሮች በቀጥታ ይወጣሉ።",
   "keno.onboard_step3": "ቁጥሮችዎ ከወጡት ቁጥሮች ጋር ከተመሳሰሉ ያሸንፋሉ — በጣም ብዙ ሲመሳሰሉ ክፍያው ይጨምራል።",
 

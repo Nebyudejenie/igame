@@ -386,3 +386,54 @@ async def test_autoplay_start_shows_a_translated_refusal_for_a_self_excluded_pla
         await page.close()
         engine.stop()
         await asyncio.wait_for(engine_task, timeout=15.0)
+
+
+async def test_placed_numbers_stay_on_the_board_and_are_counted_during_the_draw(
+    gateway_server, pool, redis, browser, conn
+):
+    """Player-experience pass (2026-09-25): the board cleared a placed
+    ticket's numbers so another ticket could be picked, so during the draw
+    the player saw none of their numbers, and the counter read "0 matched"
+    while their numbers were being drawn. Now the numbers in play are shown
+    from betting close, and the counter matches the settled result."""
+    await _seed_fast_config_and_tier(conn)
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id, first_name="KenoPlayer")
+    async with pool.acquire() as setup_conn:
+        user_id = await create_funded_user(setup_conn, Decimal("1000.00"))
+    await pool.execute("UPDATE users SET telegram_id = $1, language = 'en' WHERE id = $2", telegram_id, user_id)
+    picks = [3, 17, 42, 58, 71]
+
+    engine = KenoRoundEngine(pool, redis)
+    engine_task = asyncio.create_task(engine.run_forever())
+    try:
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.click("#open-keno-btn")
+        await page.wait_for_selector("#screen-keno.active", timeout=10000)
+        await page.click("#keno-onboard-skip-btn")
+        await page.wait_for_selector(".keno-cell:not(.locked)", timeout=10000)
+        for number in picks:
+            await page.click(f'.keno-cell[aria-label="{number}"]')
+        await page.click('#keno-stake-chips .amount-chip:has-text("10.00")')
+        await page.click("#keno-play-btn")
+        await page.wait_for_function(
+            "!document.getElementById('keno-my-tickets-section').classList.contains('hidden')", timeout=10000
+        )
+        assert await page.locator(".keno-cell.selected").count() == 0  # cleared for another ticket while betting is open
+
+        await page.wait_for_function("document.querySelectorAll('#keno-board .keno-cell.drawn').length >= 20", timeout=20000)
+        selected = await page.eval_on_selector_all(".keno-cell.selected", "cells => cells.map(c => Number(c.getAttribute('aria-label')))")
+        assert sorted(selected) == picks
+        drawn = await page.eval_on_selector_all(".keno-cell.drawn", "cells => cells.map(c => Number(c.getAttribute('aria-label')))")
+        expected_matches = len(set(drawn) & set(picks))
+        await page.screenshot(path="/tmp/keno-numbers-in-play-during-draw.png")
+        counter = (await page.text_content("#keno-match-counter")).strip()
+        assert counter.startswith(f"{expected_matches} "), f"counter {counter!r}, expected {expected_matches} matches"
+        assert await page.locator(".keno-cell.selected.matched").count() == expected_matches
+        assert console_errors == [], console_errors
+    finally:
+        await page.close()
+        engine.stop()
+        await asyncio.wait_for(engine_task, timeout=15.0)

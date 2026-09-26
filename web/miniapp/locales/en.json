@@ -234,6 +234,15 @@
   "keno.error.invalid_stake": "Please enter a valid stake.",
   "keno.error.missing_idempotency_key": "Couldn't complete this right now. Please try again.",
   "keno.error.ticket_rejected": "Couldn't place this ticket right now. Please try again.",
+  "keno.empty_state_hint_after_ticket": "Ticket in! Pick {min}–{max} numbers for another ticket, or wait for the draw",
+  "keno.autoplay_summary_one": "1 number · {stake} ETB per round",
+  "keno.autoplay_error.win_amount_required": "Enter the win amount you want to stop at.",
+  "keno.autoplay_error.loss_amount_required": "Enter the loss amount you want to stop at.",
+  "keno.autoplay_error.invalid_stake": "Please choose a valid stake.",
+  "keno.autoplay_error.invalid_stop_on_win_amount": "Please enter a valid win amount.",
+  "keno.autoplay_error.invalid_stop_on_loss_amount": "Please enter a valid loss amount.",
+  "keno.onboard_step1_generic": "Pick your numbers from the board.",
+  "keno.deposit_button": "Deposit",
   "keno.error.generic": "Couldn't complete this right now. Please try again.",
 
   "keno.ticket_placed": "Ticket placed!",
@@ -252,13 +261,13 @@
 
   "keno.result.jackpot_title": "JACKPOT!",
   "keno.result.win_title": "You won!",
-  "keno.result.lose_title": "No win this time",
-  "keno.result.no_win": "Better luck next round",
+  "keno.result.lose_title": "No win this round",
+  "keno.result.no_win": "0.00 ETB",
   "keno.result.ticket_line": "{matches} matched — {amount} ETB",
 
   "keno.paytable_match_row": "{matches} of {picks} matched",
 
-  "keno.onboard_step1": "Pick between 1 and 10 numbers from the board.",
+  "keno.onboard_step1": "Pick between {min} and {max} numbers from the board.",
   "keno.onboard_step2": "20 numbers are drawn live, every round.",
   "keno.onboard_step3": "Match your numbers to win — the more matches, the bigger the payout.",
 

@@ -33,6 +33,7 @@ let lastPlacedPicks = [];
 // test caught (Verify draw pointing at the wrong, still-open round).
 let roundTickets = new Map(); // round_id -> {tickets: [{id,picks,stake,status,payout,matches}], pendingIds: Set<id>, settled: [ticket.settled payloads]}
 let countdownInterval = null;
+let matchesSoFar = 0;
 let closingWarned = false;
 let activeScreen = null; // "keno" | "keno-result" | "keno-history" | null
 
@@ -257,12 +258,34 @@ function renderMatchPaysRows() {
   container.classList.remove("hidden");
 }
 
+// The numbers the player actually has riding on the displayed round: every
+// ticket placed this round (the board clears after each ticket so another
+// can be picked), or, with no manual ticket, the current selection -- which
+// is an active autoplay session's own picks (refreshAutoplaySession()).
+// Before this, the board showed nothing of a placed ticket during the draw
+// and the match counter read "0 matched" while the player's numbers were
+// being drawn (found in the 2026-09-25 player-experience pass).
+function numbersInPlay() {
+  const bucket = currentRound ? roundTickets.get(currentRound.round_id) : undefined;
+  const tickets = bucket ? bucket.tickets : [];
+  if (tickets.length === 0) return selectedPicks;
+  const numbers = new Set();
+  for (const ticket of tickets) for (const number of ticket.picks) numbers.add(number);
+  return numbers;
+}
+
 function renderEmptyHint() {
   const hint = el("keno-empty-hint");
   const showHint = currentRound && currentRound.status === "betting_open" && selectedPicks.size === 0;
   hint.classList.toggle("hidden", !showHint);
   if (showHint) {
-    hint.textContent = t("keno.empty_state_hint", { min: currentRound.min_picks, max: currentRound.max_picks });
+    // "to get started" reads wrong to a player who already has a ticket in.
+    const bucket = roundTickets.get(currentRound.round_id);
+    const hasTicket = Boolean(bucket && bucket.tickets.length > 0);
+    hint.textContent = t(hasTicket ? "keno.empty_state_hint_after_ticket" : "keno.empty_state_hint", {
+      min: currentRound.min_picks,
+      max: currentRound.max_picks,
+    });
   }
 }
 
@@ -358,6 +381,7 @@ const ERROR_KEYS = new Set([
 ]);
 
 function setPlayStatus(key, kind) {
+  el("keno-deposit-btn").classList.add("hidden");
   const node = el("keno-play-status");
   node.textContent = key ? t(key) : "";
   node.classList.remove("error", "success");
@@ -382,6 +406,8 @@ async function handlePlay() {
     if (!response.ok) {
       const code = ERROR_KEYS.has(data.detail) ? data.detail : "ticket_rejected";
       setPlayStatus(`keno.error.${code}`, "error");
+      // Not a dead end: a player with too little balance gets the way to fix it.
+      el("keno-deposit-btn").classList.toggle("hidden", code !== "insufficient_balance");
       haptics.warning();
       return;
     }
@@ -526,7 +552,7 @@ function renderAutoplayUI() {
 
 function openAutoplaySetup() {
   if (!isAutoplayOfferable()) return;
-  el("keno-autoplay-summary").textContent = t("keno.autoplay_summary", {
+  el("keno-autoplay-summary").textContent = t(selectedPicks.size === 1 ? "keno.autoplay_summary_one" : "keno.autoplay_summary", {
     picks: selectedPicks.size,
     stake: selectedStake,
   });
@@ -583,8 +609,14 @@ async function startAutoplay() {
     setAutoplaySetupStatus("keno.autoplay_error.config_required", "error");
     return;
   }
-  if ((winEnabled && !(Number(winAmount) > 0)) || (lossEnabled && !(Number(lossAmount) > 0))) {
-    setAutoplaySetupStatus("keno.autoplay_error.invalid_autoplay_config", "error");
+  if (winEnabled && !(Number(winAmount) > 0)) {
+    setAutoplaySetupStatus("keno.autoplay_error.win_amount_required", "error");
+    el("keno-autoplay-stop-win-amount").focus();
+    return;
+  }
+  if (lossEnabled && !(Number(lossAmount) > 0)) {
+    setAutoplaySetupStatus("keno.autoplay_error.loss_amount_required", "error");
+    el("keno-autoplay-stop-loss-amount").focus();
     return;
   }
 
@@ -774,6 +806,7 @@ ws.on("keno.betting.closed", (msg) => {
   clearInterval(countdownInterval);
   renderStatusPill();
   board.setLocked(true);
+  board.setSelected(numbersInPlay());
   updatePlayEnabled();
   // renderEmptyHint() alone, not the full renderPicksAndPayout() -- the
   // hint is status-gated (betting_open only) so it's the one piece of
@@ -791,6 +824,8 @@ ws.on("keno.draw.started", (msg) => {
   currentRound.status = "drawing";
   renderStatusPill();
   board.resetDraw();
+  board.setSelected(numbersInPlay());
+  matchesSoFar = 0;
   el("keno-recent-draws").innerHTML = "";
   el("keno-match-counter").classList.remove("hidden");
   el("keno-match-counter").textContent = t("keno.match_counter", { matches: 0 });
@@ -801,12 +836,10 @@ ws.on("keno.draw.started", (msg) => {
   el("keno-draw-progress").textContent = t("keno.draw_progress", { count: 0 });
 });
 
-let matchesSoFar = 0;
-
 ws.on("keno.number.drawn", (msg) => {
   if (!roundIdMatches(msg)) return;
   board.markDrawn(msg.number);
-  const matched = selectedPicks.has(msg.number);
+  const matched = numbersInPlay().has(msg.number);
 
   const heroBall = el("keno-hero-ball");
   heroBall.textContent = String(msg.number);
@@ -1021,7 +1054,10 @@ function renderOnboardStep() {
     const div = document.createElement("div");
     div.className = "keno-onboard-step";
     if (index === onboardIndex) div.classList.add("active");
-    div.innerHTML = `<div class="keno-onboard-pic">${step.pic}</div><div class="keno-onboard-text">${t(step.textKey)}</div>`;
+    const text = step.textKey === "keno.onboard_step1" && currentRound
+      ? t("keno.onboard_step1", { min: currentRound.min_picks, max: currentRound.max_picks })
+      : t(step.textKey === "keno.onboard_step1" ? "keno.onboard_step1_generic" : step.textKey);
+    div.innerHTML = `<div class="keno-onboard-pic">${step.pic}</div><div class="keno-onboard-text">${text}</div>`;
     stepsEl.appendChild(div);
   });
   const dotsEl = el("keno-onboard-dots");
@@ -1149,6 +1185,8 @@ async function loadHotCold() {
 
 function wireStaticControls() {
   el("keno-back-btn").addEventListener("click", () => showKenoScreen("rooms"));
+  // app.v6.js owns the wallet screen; its own header button is the one entry point.
+  el("keno-deposit-btn").addEventListener("click", () => el("open-wallet-btn").click());
   el("keno-help-btn").addEventListener("click", openOnboarding);
   el("keno-clear-btn").addEventListener("click", clearPicks);
   el("keno-lucky-btn").addEventListener("click", luckyPick);
